@@ -13,11 +13,12 @@ export * as EquationAgent from "./10_equation";
 export * as JsonAssemblyAgent from "./11_jsonAssembly";
 export * as ConfidenceValidationAgent from "./12_confidenceValidation";
 export * as VirtualMergeAgent from "./13_virtualMerge";
-export * as CaseLinkerAgent from "./14_caseLinker";
-export * as FactNormalizerAgent from "./15_factNormalizer";
-export * as CrossDocReasoningAgent from "./16_crossDocReasoning";
-export * as ActionDraftAgent from "./17_actionDraft";
-export * as HumanApprovalAgent from "./18_humanApproval";
+// Agents 14-18 are Python-based agents in separate .py files
+// export * as CaseLinkerAgent from "./14_caseLinker";
+// export * as FactNormalizerAgent from "./15_factNormalizer";
+// export * as CrossDocReasoningAgent from "./16_crossDocReasoning";
+// export * as ActionDraftAgent from "./17_actionDraft";
+// export * as HumanApprovalAgent from "./18_humanApproval";
 export * as AuditAgent from "./19_audit";
 export * as ExportAgent from "./20_export";
 export * as ConsensusAgent from "./21_consensus";
