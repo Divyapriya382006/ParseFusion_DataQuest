@@ -1,0 +1,23 @@
+{
+  "poll_interval_ms": 2000,
+  "auth": { "mode": "none" },
+  "processing_modes": [
+    {
+      "id": "auto",
+      "label": "Automatic routing",
+      "description": "The format router picks native text, OCR or spreadsheet extraction for each page."
+    }
+  ],
+  "action_types": [],
+  "confidence_bands": [
+    { "id": "high", "min": 0.85, "max": 1.0, "label": "High" },
+    { "id": "medium", "min": 0.6, "max": 0.85, "label": "Medium" },
+    { "id": "low", "min": 0.0, "max": 0.6, "label": "Low" }
+  ],
+  "severity_levels": [
+    { "id": "high", "label": "High" },
+    { "id": "medium", "label": "Medium" },
+    { "id": "low", "label": "Low" }
+  ],
+  "feature_flags": {}
+}

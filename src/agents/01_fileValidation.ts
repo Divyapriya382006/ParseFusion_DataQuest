@@ -1,23 +1,21 @@
 /**
  * Agent 01: File Validation
  *
- * Purpose: Inspects incoming file binary, sanitizes filenames, computes SHA-256 hash,
- * detects MIME type, inspects password encryption, detects duplicates, and validates file boundaries.
- * Endpoint: POST /agents/file-validation
- * Input Format: Multipart FormData containing `file` binary and optional `options` JSON string.
- * Output Format: Validated file metadata envelope unwrapped into FileValidationOutput.
+ * Purpose: Detects the real file type from content, hashes the file, enforces limits and returns a typed result.
+ * Endpoint: POST /agents/file-validation  (multipart/form-data)
+ * Input Format: { file: File; password?: string }
+ * Output Format: FileValidationOutput
  */
 
 import { apiClient } from "../api/client";
-import type { ID, ApiError } from "../types/canonical";
+import type { ID, ApiError, WarningItem } from "../types/canonical";
 
 export const ENDPOINT = "/agents/file-validation";
 
 export interface FileValidationInput {
   file: File;
-  options?: {
-    password?: string;
-  };
+  /** Optional password for protected files (sent as the `password` form field). */
+  password?: string;
 }
 
 export interface FileValidationOutput {
@@ -26,25 +24,23 @@ export interface FileValidationOutput {
   sha256: string;
   detected_mime: string;
   size_bytes: number;
-  page_count?: number;
+  page_count?: number | null;
   status: "accepted" | "rejected";
+  duplicate_of?: ID | null;
   error?: ApiError;
-  duplicate_of?: ID;
+  warnings?: WarningItem[];
 }
 
 export async function validateFile(
   input: FileValidationInput,
   signal?: AbortSignal
 ): Promise<FileValidationOutput> {
-  const formData = new FormData();
-  formData.append("file", input.file);
-  if (input.options) {
-    formData.append("options", JSON.stringify(input.options));
-  }
-
+  const form = new FormData();
+  form.append("file", input.file);
+  if (input.password) form.append("password", input.password);
   return apiClient<FileValidationOutput>(ENDPOINT, {
     method: "POST",
-    body: formData,
+    body: form,
     isFormData: true,
     signal,
   });

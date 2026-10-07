@@ -369,10 +369,13 @@ def _serial_to_dt(serial: float, epoch: int, subsec: bool) -> datetime:
 
 def _to_serial(value: Any, epoch: int) -> Optional[float]:
     if isinstance(value, datetime):
-        base = datetime(1904, 1, 1) if epoch == 1904 else datetime(1899, 12, 30)
         v = value.replace(tzinfo=None) if value.tzinfo else value
+        if epoch == 1904:
+            base = datetime(1904, 1, 1)
+        else:
+            base = datetime(1899, 12, 30) if v >= datetime(1900, 3, 1) else datetime(1899, 12, 31)
         s = (v - base).total_seconds() / 86400.0
-        return s if epoch == 1904 or s >= 61 else s + 1
+        return s
     if isinstance(value, date):
         return _to_serial(datetime(value.year, value.month, value.day), epoch)
     if isinstance(value, dtime):
@@ -386,7 +389,8 @@ def _fmt_date(serial: float, toks: List[Token], epoch: int) -> Optional[str]:
     if serial < 0:
         return None
     has_sub = any(t[0] == "subsec" for t in toks)
-    dt = _serial_to_dt(serial, epoch, has_sub)
+    fake_leap_day = epoch != 1904 and 60 <= serial < 61
+    dt = _serial_to_dt(serial - 1 if fake_leap_day else serial, epoch, has_sub)
     total_s = serial * 86400.0
     ampm = any(t[0] == "ampm" for t in toks)
     sig = [i for i, t in enumerate(toks) if t[0] != "lit"]
@@ -418,7 +422,8 @@ def _fmt_date(serial: float, toks: List[Token], epoch: int) -> Optional[str]:
             else:
                 out.append(MONTHS[dt.month - 1][0])
         elif k == "d":
-            out.append(f"{dt.day:0{t[1]}d}" if t[1] <= 2 else (DAYS[dt.weekday()][:3] if t[1] == 3 else DAYS[dt.weekday()]))
+            day = 29 if fake_leap_day else dt.day
+            out.append(f"{day:0{t[1]}d}" if t[1] <= 2 else (DAYS[dt.weekday()][:3] if t[1] == 3 else DAYS[dt.weekday()]))
         elif k == "h":
             h = (dt.hour % 12 or 12) if ampm else dt.hour
             out.append(f"{h:0{t[1]}d}")

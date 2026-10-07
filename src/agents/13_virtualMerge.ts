@@ -1,10 +1,10 @@
 /**
  * Agent 13: Virtual Document Merge
  *
- * Purpose: Merges multi-document batches into a cohesive virtual document pagination sequence with boundary tracking.
+ * Purpose: Pure page mapping that numbers the pages of several sources 1..N without touching any source.
  * Endpoint: POST /agents/virtual-merge
  * Input Format: { batch_id: ID; ordered_source_ids: ID[] }
- * Output Format: { virtual_document_id: ID; pages: { virtual_page_number: number; source_id: ID; page_number: number; page_id: ID; boundary_start: boolean }[] }
+ * Output Format: VirtualMergeOutput
  */
 
 import { apiClient } from "../api/client";
@@ -34,9 +34,5 @@ export async function mergeVirtualDocument(
   input: VirtualMergeInput,
   signal?: AbortSignal
 ): Promise<VirtualMergeOutput> {
-  return apiClient<VirtualMergeOutput>(ENDPOINT, {
-    method: "POST",
-    body: input,
-    signal,
-  });
+  return apiClient<VirtualMergeOutput>(ENDPOINT, { method: "POST", body: input, signal });
 }

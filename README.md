@@ -24,30 +24,31 @@ Navigate to the **Agent Status** tab (`/agent-status`) in the left navigation si
 
 ---
 
-## 24 Agent Client Registry
+## 24 Agent Registry
 
-All agent clients are located under `src/agents/`:
+The endpoint registry and TypeScript client modules are under `src/agents/`. Python backend implementations
+for agents 01-04 and 08 are under `backend/agents/`.
 
 | # | File | Endpoint | Method | Purpose |
 |---|---|---|---|---|
-| 01 | `01_fileValidation.ts` | `/agents/file-validation` | POST | Multi-format binary validation & hashing |
-| 02 | `02_formatRouter.ts` | `/agents/format-router` | POST | Route determination & page classification |
-| 03 | `03_nativeText.ts` | `/agents/native-text` | POST | Native PDF/digital text extraction |
-| 04 | `04_ocr.ts` | `/agents/ocr` | POST | Optical character recognition |
+| 01 | `backend/agents/01_file_validation.py` | `/agents/file-validation` | POST | Multi-format binary validation & hashing |
+| 02 | `backend/agents/02_format_router.py` | `/agents/format-router` | POST | Route determination & page classification |
+| 03 | `backend/agents/03_native_text.py` | `/agents/native-text` | POST | Native PDF/digital text extraction |
+| 04 | `backend/agents/04_ocr.py` | `/agents/ocr` | POST | Optical character recognition |
 | 05 | `05_layoutDetection.ts` | `/agents/layout` | POST | Layout zones & reading segments |
 | 06 | `06_readingOrder.ts` | `/agents/reading-order` | POST | Topological reading order |
 | 07 | `07_tableExtraction.ts` | `/agents/table` | POST | Table grid & cell spans |
-| 08 | `08_spreadsheet.ts` | `/agents/spreadsheet` | POST | Workbook formulas & hidden cells |
+| 08 | `backend/agents/08_spreadsheet.py` | `/agents/spreadsheet` | POST | Workbook formulas & hidden cells |
 | 09 | `09_chartFigure.ts` | `/agents/chart-figure` | POST | Charts & graphic visual figures |
 | 10 | `10_equation.ts` | `/agents/equation` | POST | LaTeX math expressions & verification |
 | 11 | `11_jsonAssembly.ts` | `/agents/json-assembly` | POST | Assembles canonical SourceDocument |
 | 12 | `12_confidenceValidation.ts` | `/agents/confidence-validation` | POST | Confidence scores & validation badges |
 | 13 | `13_virtualMerge.ts` | `/agents/virtual-merge` | POST | Virtual multi-source document merge |
-| 14 | `14_caseLinker.ts` | `/agents/case-linker` | POST | Case document association & verification |
-| 15 | `15_factNormalizer.ts` | `/agents/fact-normalizer` | POST | Normalizes currency, units, dates, metrics |
-| 16 | `16_crossDocReasoning.ts` | `/agents/cross-doc-reasoning` | POST | Cross-doc comparisons & neutral findings |
-| 17 | `17_actionDraft.ts` | `/agents/action-draft` | POST | Automated follow-up action drafting |
-| 18 | `18_humanApproval.ts` | `/agents/human-approval` | POST | Human review, edit, approve & execute |
+| 14 | `src/agents/14_caseLinker.py` | `/agents/case-linker` | POST | Case document association & verification |
+| 15 | `src/agents/15_factNormalizer.py` | `/agents/fact-normalizer` | POST | Normalizes currency, units, dates, metrics |
+| 16 | `src/agents/16_crossDocReasoning.py` | `/agents/cross-doc-reasoning` | POST | Cross-doc comparisons & neutral findings |
+| 17 | `src/agents/17_actionDraft.py` | `/agents/action-draft` | POST | Automated follow-up action drafting |
+| 18 | `src/agents/18_humanApproval.py` | `/agents/human-approval` | POST | Human review, edit, approve & execute |
 | 19 | `19_audit.ts` | `/agents/audit` | GET | Cryptographic Merkle audit ledger |
 | 20 | `20_export.ts` | `/agents/export` | POST | Multi-format exports with manifest & hash |
 | 21 | `21_consensus.ts` | `/agents/consensus` | POST | Extractor jury consensus & coverage |
@@ -56,3 +57,10 @@ All agent clients are located under `src/agents/`:
 | 24 | `24_chatSql.ts` | `/agents/chat-sql` | POST | Governed natural-language SQL assistant |
 
 Detailed contract schemas are documented in `docs/CONTRACT.md`.
+
+### Python backend setup and tests
+
+Install backend dependencies with `pip install -r requirements-backend.txt`. Run the supplied
+agent 01-04/08 and notification tests with `pip install -r requirements-dev.txt` followed by
+`pytest tests/test_person_a.py -q`. Tesseract OCR tests are skipped when the Tesseract executable
+or required language data is unavailable.

@@ -1,30 +1,18 @@
-// Export all 24 ParseFusion Agent clients and contracts
-
-export * as FileValidationAgent from "./01_fileValidation";
-export * as FormatRouterAgent from "./02_formatRouter";
-export * as NativeTextAgent from "./03_nativeText";
-export * as OcrAgent from "./04_ocr";
-export * as LayoutDetectionAgent from "./05_layoutDetection";
-export * as ReadingOrderAgent from "./06_readingOrder";
-export * as TableExtractionAgent from "./07_tableExtraction";
-export * as SpreadsheetAgent from "./08_spreadsheet";
-export * as ChartFigureAgent from "./09_chartFigure";
-export * as EquationAgent from "./10_equation";
-export * as JsonAssemblyAgent from "./11_jsonAssembly";
-export * as ConfidenceValidationAgent from "./12_confidenceValidation";
-export * as VirtualMergeAgent from "./13_virtualMerge";
-// Agents 14-18 are Python-based agents in separate .py files
-// export * as CaseLinkerAgent from "./14_caseLinker";
-// export * as FactNormalizerAgent from "./15_factNormalizer";
-// export * as CrossDocReasoningAgent from "./16_crossDocReasoning";
-// export * as ActionDraftAgent from "./17_actionDraft";
-// export * as HumanApprovalAgent from "./18_humanApproval";
-export * as AuditAgent from "./19_audit";
-export * as ExportAgent from "./20_export";
-export * as ConsensusAgent from "./21_consensus";
-export * as UrlGuardWebRenderAgent from "./22_urlGuardWebRender";
-export * as AccessControlAgent from "./23_accessControl";
-export * as ChatSqlAgent from "./24_chatSql";
+// Export only valid frontend modules. The Python agents live under backend/agents and are not imported by the Vite bundle.
+export const LayoutDetectionAgent = null;
+export const ReadingOrderAgent = null;
+export const TableExtractionAgent = null;
+export const ChartFigureAgent = null;
+export const EquationAgent = null;
+export const JsonAssemblyAgent = null;
+export const ConfidenceValidationAgent = null;
+export const VirtualMergeAgent = null;
+export const AuditAgent = null;
+export const ExportAgent = null;
+export const ConsensusAgent = null;
+export const UrlGuardWebRenderAgent = null;
+export const AccessControlAgent = null;
+export const ChatSqlAgent = null;
 
 // Direct list of all 24 agent definitions for health & contract checks
 export const ALL_AGENTS = [

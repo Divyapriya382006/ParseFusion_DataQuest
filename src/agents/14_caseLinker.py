@@ -44,7 +44,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from math import sqrt
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
