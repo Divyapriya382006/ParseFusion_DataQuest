@@ -1,0 +1,6 @@
+{
+  "name": "ParseFusion",
+  "description": "Document and case intelligence platform with parallel extractor jury, evidence linking, fact normalization, cross-document reasoning, and governed access control.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
