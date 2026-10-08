@@ -274,6 +274,13 @@ def test_audit_query_requires_capability_and_logs_denial():
     assert any(e["event_type"] == "audit_read" and e["outcome"] == "denied" for e in audit_events())
 
 
+def test_audit_query_accepts_wildcard_and_ui_capability():
+    for capabilities in (["*"], ["admin:*"], ["superuser"], ["audit:view"]):
+        user = {"user_id": "auditor", "role": "user", "tenant_id": "t1", "capabilities": capabilities}
+        as_user(user)
+        assert A19.query_audit(user)["chain_valid"]
+
+
 def test_audit_query_filters_cursor_and_self_audit():
     for i in range(7):
         A19.append(ev("a" if i % 2 else "b", actor_id="u1", tenant_id="t1"))

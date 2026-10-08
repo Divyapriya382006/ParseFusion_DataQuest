@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Download, FileArchive, CheckCircle2, ExternalLink } from "lucide-react";
 import { requestExport, fetchExportHistory } from "../agents/20_export";
 import type { ExportRecord } from "../agents/20_export";
+import { getApiUrl } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
 import { BackendNotConnected } from "../components/common/BackendNotConnected";
 import { formatBackendDate } from "../lib/formatters";
@@ -19,6 +20,12 @@ export const ExportsPage: React.FC = () => {
   const [activeExport, setActiveExport] = useState<ExportRecord | null>(null);
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (config?.output_formats?.length && !config.output_formats.some((option) => option.id === format)) {
+      setFormat(config.output_formats[0].id);
+    }
+  }, [config?.output_formats, format]);
 
   // Fetch export history from Agent 20
   const { data: historyData, isError: historyError, refetch: refetchHistory } = useQuery({
@@ -210,7 +217,7 @@ export const ExportsPage: React.FC = () => {
 
           <div className="flex items-center gap-4 pt-2">
             <a
-              href={activeExport.download_url}
+              href={getApiUrl(activeExport.download_url)}
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium"
@@ -221,7 +228,7 @@ export const ExportsPage: React.FC = () => {
 
             {activeExport.signed_manifest_url && (
               <a
-                href={activeExport.signed_manifest_url}
+                href={getApiUrl(activeExport.signed_manifest_url)}
                 target="_blank"
                 rel="noreferrer"
                 className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-neutral-700 text-neutral-300 hover:bg-neutral-800"
@@ -261,7 +268,7 @@ export const ExportsPage: React.FC = () => {
                     <td className="p-2 text-neutral-400 truncate max-w-xs">{exp.content_hash}</td>
                     <td className="p-2 text-right">
                       <a
-                        href={exp.download_url}
+                        href={getApiUrl(exp.download_url)}
                         className="inline-flex items-center gap-1 text-sky-400 hover:text-sky-300"
                       >
                         <Download className="w-3 h-3" />

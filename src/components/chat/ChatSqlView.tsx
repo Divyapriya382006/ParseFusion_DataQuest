@@ -11,6 +11,7 @@ import type { ChatSqlOutput } from "../../agents/24_chatSql";
 import { askChatSql } from "../../agents/24_chatSql";
 import { LockedCell } from "../common/LockedCell";
 import { useEvidence } from "../../context/EvidenceContext";
+import { EvidenceHover } from "../evidence/EvidenceHover";
 import { ErrorAlert } from "../common/ErrorAlert";
 
 interface ChatMessage {
@@ -217,15 +218,16 @@ export const ChatSqlView: React.FC = () => {
                         Evidence Citations:
                       </span>
                       {msg.data.citations.map((cite, idx) => (
-                        <button
-                          key={idx}
-                          type="button"
-                          onClick={() => openEvidence(cite)}
-                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 text-sky-400 hover:text-sky-300 font-mono text-[10px] transition-colors"
-                        >
-                          <Link2 className="w-2.5 h-2.5" />
-                          <span>{cite.filename || cite.source_id} p.{cite.page_number}</span>
-                        </button>
+                        <EvidenceHover key={idx} evidence={cite} focusable={false} openOnClick={false}>
+                          <button
+                            type="button"
+                            onClick={() => openEvidence(cite)}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 text-sky-400 hover:text-sky-300 font-mono text-[10px] transition-colors"
+                          >
+                            <Link2 className="w-2.5 h-2.5" />
+                            <span>{cite.filename || cite.source_id} p.{cite.page_number}</span>
+                          </button>
+                        </EvidenceHover>
                       ))}
                     </div>
                   )}

@@ -8,13 +8,16 @@ import {
   Activity,
   AlertCircle,
   CheckCircle2,
+  Download,
 } from "lucide-react";
 import { getBatch, retryBatchSource } from "../api/batches";
+import { getApiUrl } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
 import { BackendNotConnected } from "../components/common/BackendNotConnected";
 import { ErrorAlert } from "../components/common/ErrorAlert";
 import { Skeleton } from "../components/common/LoadingSkeleton";
 import { formatBackendDate } from "../lib/formatters";
+import { NotConnectedError } from "../api/errors";
 
 export const BatchProgressPage: React.FC = () => {
   const [searchParams] = useSearchParams();
@@ -36,7 +39,10 @@ export const BatchProgressPage: React.FC = () => {
     queryKey: ["batchStatus", batchId],
     queryFn: ({ signal }) => getBatch(batchId, signal),
     enabled: Boolean(batchId) && !configNotConnected,
+    // A 404 means the batch does not exist (e.g. the backend restarted): asking again will not change that.
+    retry: (count, err) => !(err instanceof NotConnectedError && err.status === 404) && count < 2,
     refetchInterval: (query) => {
+      if (query.state.status === "error") return false; // batch gone or backend down: stop polling, show Retry
       const status = query.state.data?.status;
       return status === "completed" || status === "failed" ? false : pollInterval;
     },
@@ -66,6 +72,26 @@ export const BatchProgressPage: React.FC = () => {
               Go to Ingestion
             </Link>
           </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (isError && error instanceof NotConnectedError && error.status === 404) {
+    return (
+      <div className="p-8 max-w-4xl mx-auto space-y-4 text-xs">
+        <h1 className="text-xl font-bold text-neutral-100">Batch Pipeline Tracker</h1>
+        <div className="p-6 bg-neutral-900/60 border border-neutral-800 rounded-xl text-center text-neutral-400 space-y-4">
+          <p>
+            Batch <span className="font-mono text-neutral-300">{batchId}</span> was not found on the backend. Batches are
+            kept in memory, so they are cleared when the backend restarts.
+          </p>
+          <Link
+            to="/"
+            className="inline-flex items-center gap-1.5 px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg font-medium"
+          >
+            Start a new run
+          </Link>
         </div>
       </div>
     );
@@ -158,6 +184,45 @@ export const BatchProgressPage: React.FC = () => {
             )}
           </div>
 
+          {batchData.output_formats && batchData.output_formats.length > 0 && (
+            <div className="p-4 bg-neutral-900/60 border border-neutral-800 rounded-xl space-y-3">
+              <div>
+                <div className="text-[11px] font-semibold text-neutral-300 uppercase tracking-wider">
+                  Requested Output Formats
+                </div>
+                <div className="text-[11px] text-neutral-500 mt-1">
+                  {batchData.output_formats.join(", ")}
+                  {batchData.stage === "exporting" && " · Generating downloads..."}
+                </div>
+              </div>
+
+              {batchData.exports && batchData.exports.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {batchData.exports.map((output) => (
+                    <a
+                      key={output.export_id}
+                      href={getApiUrl(output.download_url)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/30 text-emerald-200"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Download {output.format.toUpperCase()}</span>
+                    </a>
+                  ))}
+                </div>
+              )}
+
+              {batchData.export_errors && batchData.export_errors.length > 0 && (
+                <ul className="space-y-1 text-rose-300" role="alert">
+                  {batchData.export_errors.map((failure) => (
+                    <li key={`${failure.format}:${failure.code}`}>
+                      {failure.format.toUpperCase()} export failed: {failure.message}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
           {/* Sources Execution Table */}
           <div className="p-4 bg-neutral-900/60 border border-neutral-800 rounded-xl space-y-3">
             <div className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider flex items-center gap-1.5">
@@ -187,7 +252,7 @@ export const BatchProgressPage: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => handleRetry(srcId)}
-                      disabled={retryingSource === srcId}
+                      disabled={retryingSource === srcId || batchData.stage === "exporting"}
                       className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-300 font-mono text-[11px] disabled:opacity-50"
                       title="Retry processing for this document"
                     >

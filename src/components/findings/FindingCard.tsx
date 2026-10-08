@@ -5,6 +5,8 @@ import { ConfidenceIndicator } from "../common/ConfidenceIndicator";
 import { useEvidence } from "../../context/EvidenceContext";
 import { useAuth } from "../../context/AuthContext";
 import { CAPABILITY_KEYS } from "../../config/capabilityKeys";
+import { EvidenceHover } from "../evidence/EvidenceHover";
+import { HighlightScope } from "../evidence/HighlightScope";
 
 interface FindingCardProps {
   finding: DiscrepancyFinding;
@@ -26,7 +28,10 @@ export const FindingCard: React.FC<FindingCardProps> = ({
   const canDraftAction = hasCapability(CAPABILITY_KEYS.ACTION_DRAFT);
 
   return (
-    <div className="p-4 bg-neutral-950/70 border border-neutral-800 rounded-xl space-y-3 text-xs">
+    <HighlightScope
+      evidences={finding.evidence_references}
+      className="p-4 bg-neutral-950/70 border border-neutral-800 rounded-xl space-y-3 text-xs"
+    >
       {/* Header */}
       <div className="flex items-start justify-between gap-3">
         <div className="space-y-1">
@@ -108,15 +113,16 @@ export const FindingCard: React.FC<FindingCardProps> = ({
         <div className="pt-1 flex flex-wrap items-center gap-2">
           <span className="text-[10px] text-neutral-500">Supporting Evidence:</span>
           {finding.evidence_references.map((ev, idx) => (
-            <button
-              key={idx}
-              type="button"
-              onClick={() => openEvidence(ev)}
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-sky-400 hover:text-sky-300 font-mono text-[11px] transition-colors"
-            >
-              <Link2 className="w-2.5 h-2.5" />
-              <span>{ev.filename || ev.source_id} p.{ev.page_number}</span>
-            </button>
+            <EvidenceHover key={idx} evidence={ev} focusable={false} openOnClick={false}>
+              <button
+                type="button"
+                onClick={() => openEvidence(ev)}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-sky-400 hover:text-sky-300 font-mono text-[11px] transition-colors"
+              >
+                <Link2 className="w-2.5 h-2.5" />
+                <span>{ev.filename || ev.source_id} p.{ev.page_number}</span>
+              </button>
+            </EvidenceHover>
           ))}
         </div>
       )}
@@ -156,6 +162,6 @@ export const FindingCard: React.FC<FindingCardProps> = ({
           </button>
         )}
       </div>
-    </div>
+    </HighlightScope>
   );
 };

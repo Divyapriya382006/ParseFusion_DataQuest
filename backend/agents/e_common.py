@@ -216,7 +216,7 @@ def get_ctx() -> ReqCtx:
 _CAP_ALIASES = {
     "approve": ("approve", "approve_action", "approve_actions", "actions.approve"),
     "execute": ("execute", "execute_action", "execute_actions", "actions.execute"),
-    "audit": ("audit", "view_audit", "audit.read", "read_audit"),
+    "audit": ("audit", "view_audit", "audit.read", "read_audit", "audit:view"),
     "unmask": ("unmask", "unmask_data", "export.unmask"),
     "admin": ("admin", "access_admin", "administrator"),
 }
@@ -254,7 +254,8 @@ def _caps(user: dict) -> set:
 
 def has_cap(user: dict, logical: str) -> bool:
     names = _CAP_ALIASES.get(logical, (logical,))
-    return any(n in _caps(user) for n in names)
+    capabilities = _caps(user)
+    return bool(capabilities & {"*", "admin:*", "superuser"}) or any(n in capabilities for n in names)
 
 
 def is_admin(user: dict) -> bool:

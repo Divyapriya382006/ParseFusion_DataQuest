@@ -152,6 +152,14 @@ export const EvidenceReferenceSchema = z.object({
   text_excerpt: z.string(),
   bbox: z.tuple([z.number(), z.number(), z.number(), z.number()]).nullable(),
   confidence: z.number(),
+  page_id: z.string().optional(),
+  extraction_method: z.string().optional(),
+  bbox_unavailable_reason: z.string().optional(),
+  page_width: z.number().optional(),
+  page_height: z.number().optional(),
+  crop_url: z.string().optional(),
+  locked: z.boolean().optional(),
+  masked: z.boolean().optional(),
 });
 
 export const AppConfigSchema = z.object({

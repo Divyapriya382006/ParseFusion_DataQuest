@@ -1,6 +1,9 @@
 import React from "react";
-import type { Block, BoundingBox } from "../../types/canonical";
+import type { Block, BoundingBox, PageUnit } from "../../types/canonical";
 import { useConfig } from "../../context/ConfigContext";
+import { blockToEvidence } from "../../lib/evidence";
+import type { HighlightBox } from "../../lib/evidence";
+import { useEvidenceHover } from "../evidence/useEvidenceHover";
 
 interface SvgOverlayProps {
   pageWidth: number;
@@ -12,7 +15,100 @@ interface SvgOverlayProps {
   showHeatmap: boolean;
   showUncovered: boolean;
   uncoveredRegions?: BoundingBox[];
+  /** Page the blocks belong to. With it, hovering an outline shows the hover-to-source popover. */
+  page?: PageUnit;
+  filename?: string;
+  /** Block hovered either on the page or in the side panel (two-way highlighting). */
+  hoveredBlockId?: string | null;
+  onHoverBlock?: (blockId: string | null) => void;
+  /** Boxes published by hovered values elsewhere in the app (facts, findings, table cells ...). */
+  contextBoxes?: HighlightBox[];
 }
+
+interface BlockOutlineProps {
+  block: Block;
+  style: { stroke: string; fill: string; strokeWidth: number };
+  isHovered: boolean;
+  page?: PageUnit;
+  filename?: string;
+  onSelectBlock: (block: Block) => void;
+  onHoverBlock?: (blockId: string | null) => void;
+}
+
+const BlockOutline: React.FC<BlockOutlineProps> = ({
+  block,
+  style,
+  isHovered,
+  page,
+  filename,
+  onSelectBlock,
+  onHoverBlock,
+}) => {
+  const bbox = block.location?.bbox;
+  const evidence = page ? blockToEvidence(block, page, filename) : null;
+  const { anchorProps, popover } = useEvidenceHover({
+    evidence,
+    pageData: page,
+    // On the page itself, "open the source" means selecting the block in the side panel.
+    onActivate: () => onSelectBlock(block),
+    openOnClick: false,
+    highlight: false,
+  });
+  if (!bbox) return null;
+  const [x1, y1, x2, y2] = bbox;
+
+  return (
+    <g className="cursor-pointer">
+      <rect
+        x={x1}
+        y={y1}
+        width={Math.max(0, x2 - x1)}
+        height={Math.max(0, y2 - y1)}
+        stroke={isHovered ? "#22d3ee" : style.stroke}
+        strokeWidth={isHovered ? style.strokeWidth + 2 : style.strokeWidth}
+        fill={isHovered ? "rgba(34, 211, 238, 0.2)" : style.fill}
+        data-block-id={block.block_id}
+        data-hovered={isHovered ? "true" : "false"}
+        tabIndex={evidence ? 0 : undefined}
+        role="button"
+        aria-label={`${block.type} block ${block.reading_order_index}`}
+        {...(evidence ? anchorProps : {})}
+        onPointerEnter={(e) => {
+          onHoverBlock?.(block.block_id);
+          if (evidence) anchorProps.onPointerEnter(e);
+        }}
+        onPointerLeave={(e) => {
+          onHoverBlock?.(null);
+          if (evidence) anchorProps.onPointerLeave(e);
+        }}
+        onFocus={() => {
+          onHoverBlock?.(block.block_id);
+          if (evidence) anchorProps.onFocus();
+        }}
+        onBlur={() => {
+          onHoverBlock?.(null);
+          if (evidence) anchorProps.onBlur();
+        }}
+        onClick={() => onSelectBlock(block)}
+        className="transition-colors hover:stroke-cyan-400"
+      />
+      {/* Small index badge */}
+      <circle cx={x1 + 8} cy={y1 + 8} r={6} fill="#0f172a" stroke={style.stroke} strokeWidth={1} />
+      <text
+        x={x1 + 8}
+        y={y1 + 11}
+        textAnchor="middle"
+        fontSize={8}
+        fill="#e2e8f0"
+        fontFamily="monospace"
+        pointerEvents="none"
+      >
+        {block.reading_order_index}
+      </text>
+      {popover}
+    </g>
+  );
+};
 
 export const SvgOverlay: React.FC<SvgOverlayProps> = ({
   pageWidth,
@@ -24,6 +120,11 @@ export const SvgOverlay: React.FC<SvgOverlayProps> = ({
   showHeatmap,
   showUncovered,
   uncoveredRegions = [],
+  page,
+  filename,
+  hoveredBlockId,
+  onHoverBlock,
+  contextBoxes = [],
 }) => {
   const { config } = useConfig();
 
@@ -124,45 +225,38 @@ export const SvgOverlay: React.FC<SvgOverlayProps> = ({
 
       {/* Structured Blocks */}
       {blocks.map((block) => {
-        const bbox = block.location?.bbox;
-        if (!bbox) return null;
-        const [x1, y1, x2, y2] = bbox;
-        const isSelected = selectedBlockId === block.block_id;
-        const style = getBlockStyle(block, isSelected);
-
+        if (!block.location?.bbox) return null;
         return (
-          <g key={block.block_id} className="cursor-pointer">
-            <rect
-              x={x1}
-              y={y1}
-              width={Math.max(0, x2 - x1)}
-              height={Math.max(0, y2 - y1)}
-              stroke={style.stroke}
-              strokeWidth={style.strokeWidth}
-              fill={style.fill}
-              onClick={() => onSelectBlock(block)}
-              className="transition-colors hover:stroke-cyan-400"
-            />
-            {/* Small index badge */}
-            <circle
-              cx={x1 + 8}
-              cy={y1 + 8}
-              r={6}
-              fill="#0f172a"
-              stroke={style.stroke}
-              strokeWidth={1}
-            />
-            <text
-              x={x1 + 8}
-              y={y1 + 11}
-              textAnchor="middle"
-              fontSize={8}
-              fill="#e2e8f0"
-              fontFamily="monospace"
-            >
-              {block.reading_order_index}
-            </text>
-          </g>
+          <BlockOutline
+            key={block.block_id}
+            block={block}
+            style={getBlockStyle(block, selectedBlockId === block.block_id)}
+            isHovered={hoveredBlockId === block.block_id}
+            page={page}
+            filename={filename}
+            onSelectBlock={onSelectBlock}
+            onHoverBlock={onHoverBlock}
+          />
+        );
+      })}
+
+      {/* Boxes published by hovered values elsewhere (two-way highlighting) */}
+      {contextBoxes.map((box) => {
+        if (!box.bbox) return null;
+        const [x1, y1, x2, y2] = box.bbox;
+        return (
+          <rect
+            key={`ctx-${box.id}`}
+            data-testid="context-highlight"
+            x={x1}
+            y={y1}
+            width={Math.max(0, x2 - x1)}
+            height={Math.max(0, y2 - y1)}
+            stroke="#f59e0b"
+            strokeWidth={3}
+            fill="rgba(245, 158, 11, 0.25)"
+            pointerEvents="none"
+          />
         );
       })}
 

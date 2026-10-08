@@ -73,6 +73,7 @@ export const EvidenceModalViewer: React.FC = () => {
               page={pageData}
               currentPageNumber={pageNumber}
               highlightedBbox={activeEvidence.bbox}
+              filename={activeEvidence.filename}
             />
           )}
         </div>

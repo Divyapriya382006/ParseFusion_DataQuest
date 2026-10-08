@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import io
 import math
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutTimeout
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -35,6 +36,9 @@ from backend.agents._support import (AgentError, Code, Location, S, Timer, Warni
                                      current_user, dbg, endpoint, get_page_image, load_meta, page_id_for, store_get)
 
 AGENT = "04-ocr"
+
+# Several pages are OCR'd in parallel; one thread per Tesseract process avoids oversubscribing the CPU.
+os.environ.setdefault("OMP_THREAD_LIMIT", "1")
 
 
 class RegionIn(BaseModel):
@@ -85,9 +89,23 @@ _PADDLE: Dict[str, Any] = {}
 _PADDLE_LOCK = threading.Lock()
 
 
+def _locate_tesseract() -> None:
+    """Point pytesseract at the binary: TESSERACT_CMD, else PATH, else the usual Windows install folders."""
+    import shutil
+    import pytesseract
+    candidates = [os.getenv("TESSERACT_CMD", ""), shutil.which("tesseract") or "",
+                  r"C:\Program Files\Tesseract-OCR\tesseract.exe", r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+                  os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe")]
+    for c in candidates:
+        if c and os.path.isfile(c):
+            pytesseract.pytesseract.tesseract_cmd = c
+            return
+
+
 def _tess_available() -> bool:
     try:
         import pytesseract
+        _locate_tesseract()
         pytesseract.get_tesseract_version()
         return True
     except Exception:

@@ -5,6 +5,8 @@ import { fetchAuditLog } from "../agents/19_audit";
 import { BackendNotConnected } from "../components/common/BackendNotConnected";
 import { formatBackendDate } from "../lib/formatters";
 import { Skeleton } from "../components/common/LoadingSkeleton";
+import { EvidenceHover } from "../components/evidence/EvidenceHover";
+import { evidenceFromDetails } from "../lib/evidence";
 
 export const AuditLogPage: React.FC = () => {
   const [actor, setActor] = useState("");
@@ -161,7 +163,10 @@ export const AuditLogPage: React.FC = () => {
                       {ev.actor_id} ({ev.actor_role})
                     </td>
                     <td className="p-3 text-neutral-400">
-                      {ev.object_type}: {ev.object_id}
+                      {/* Entries that reference a block carry an EvidenceReference in their details */}
+                      <EvidenceHover evidence={evidenceFromDetails(ev.details)[0]}>
+                        {ev.object_type}: {ev.object_id}
+                      </EvidenceHover>
                     </td>
                     <td className="p-3 text-sky-400 truncate max-w-[120px]" title={ev.hash}>
                       {ev.hash.substring(0, 10)}...

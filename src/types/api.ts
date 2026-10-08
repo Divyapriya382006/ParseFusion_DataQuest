@@ -97,6 +97,18 @@ export interface BatchSummary {
   created_at: ISODate;
   status: string;
   source_ids: ID[];
+  output_formats?: string[];
+  exports?: {
+    export_id: ID;
+    format: string;
+    download_url: string;
+    content_hash: string;
+  }[];
+  export_errors?: {
+    format: string;
+    code: string;
+    message: string;
+  }[];
   case_id?: ID;
   progress_percent?: number;
   stage?: string;

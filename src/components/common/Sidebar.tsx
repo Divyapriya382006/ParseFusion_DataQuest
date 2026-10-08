@@ -1,6 +1,7 @@
 import React from "react";
 import { NavLink } from "react-router-dom";
 import {
+  GitCompareArrows,
   Upload,
   Layers,
   LayoutDashboard,
@@ -48,6 +49,12 @@ const NAV_ITEMS: NavItemDef[] = [
     label: "Case Review",
     path: "/cases",
     icon: FolderGit2,
+    capability: CAPABILITY_KEYS.CASE_REVIEW,
+  },
+  {
+    label: "Case Analysis",
+    path: "/case-analysis",
+    icon: GitCompareArrows,
     capability: CAPABILITY_KEYS.CASE_REVIEW,
   },
   {

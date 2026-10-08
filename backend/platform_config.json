@@ -1,6 +1,8 @@
 {
   "poll_interval_ms": 2000,
-  "auth": { "mode": "none" },
+  "auth": {
+    "mode": "none"
+  },
   "processing_modes": [
     {
       "id": "auto",
@@ -10,14 +12,82 @@
   ],
   "action_types": [],
   "confidence_bands": [
-    { "id": "high", "min": 0.85, "max": 1.0, "label": "High" },
-    { "id": "medium", "min": 0.6, "max": 0.85, "label": "Medium" },
-    { "id": "low", "min": 0.0, "max": 0.6, "label": "Low" }
+    {
+      "id": "high",
+      "min": 0.85,
+      "max": 1.0,
+      "label": "High"
+    },
+    {
+      "id": "medium",
+      "min": 0.6,
+      "max": 0.85,
+      "label": "Medium"
+    },
+    {
+      "id": "low",
+      "min": 0.0,
+      "max": 0.6,
+      "label": "Low"
+    }
   ],
   "severity_levels": [
-    { "id": "high", "label": "High" },
-    { "id": "medium", "label": "Medium" },
-    { "id": "low", "label": "Low" }
+    {
+      "id": "high",
+      "label": "High"
+    },
+    {
+      "id": "medium",
+      "label": "Medium"
+    },
+    {
+      "id": "low",
+      "label": "Low"
+    }
   ],
-  "feature_flags": {}
+  "feature_flags": {},
+  "consensus": {
+    "ocr_cross_check": true,
+    "native_weight": 0.6,
+    "agreement_weight": 0.4,
+    "agreement_review_below": 0.8,
+    "ocr_only_min_confidence": 0.4,
+    "min_figure_area": 0.01,
+    "max_cross_check_pages": 200,
+    "max_region_rechecks_per_page": 60
+  },
+  "agents": {
+    "reasoning": {
+      "tolerance_abs": 0.01,
+      "tolerance_pct": 1.0,
+      "rounding_pct": 0.5,
+      "severity_thresholds": [
+        {
+          "severity": "high",
+          "min_pct": 10
+        },
+        {
+          "severity": "medium",
+          "min_pct": 2
+        }
+      ],
+      "default_severity": "low",
+      "max_facts": 5000,
+      "max_pairs_per_group": 200,
+      "confidence_penalties": {
+        "ambiguity": 0.1,
+        "weak_check": 0.05
+      },
+      "notify_severities": [
+        "high"
+      ],
+      "required_capability": "cases:review",
+      "excerpt_max_chars": 300,
+      "label_max_chars": 120
+    },
+    "fact_normalizer": {
+      "required_capability": "cases:review",
+      "include_unverified_links": false
+    }
+  }
 }

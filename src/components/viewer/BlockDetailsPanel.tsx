@@ -1,16 +1,37 @@
 import React from "react";
 import { X, AlertCircle, CheckCircle2, Scale, ShieldAlert, Cpu } from "lucide-react";
-import type { Block } from "../../types/canonical";
+import type { Block, PageUnit } from "../../types/canonical";
 import { ConfidenceIndicator } from "../common/ConfidenceIndicator";
 import { LockedCell } from "../common/LockedCell";
 
 interface BlockDetailsPanelProps {
   block: Block | null;
   onClose: () => void;
+  page?: PageUnit;
+  filename?: string;
+  /** Block hovered on the page; its values light up here (two-way highlighting). */
+  hoveredBlockId?: string | null;
+  /** Hovering a value here highlights its box on the page. */
+  onHoverValue?: (blockId: string | null) => void;
 }
 
-export const BlockDetailsPanel: React.FC<BlockDetailsPanelProps> = ({ block, onClose }) => {
+export const BlockDetailsPanel: React.FC<BlockDetailsPanelProps> = ({
+  block,
+  onClose,
+  hoveredBlockId,
+  onHoverValue,
+}) => {
   if (!block) return null;
+  const hovered = hoveredBlockId === block.block_id;
+  const hoverProps = {
+    onPointerEnter: () => onHoverValue?.(block.block_id),
+    onPointerLeave: () => onHoverValue?.(null),
+    onFocus: () => onHoverValue?.(block.block_id),
+    onBlur: () => onHoverValue?.(null),
+    tabIndex: 0,
+    "data-hovered": hovered ? "true" : "false",
+  } as const;
+  const hoverRing = hovered ? "ring-2 ring-cyan-400" : "";
 
   return (
     <aside className="w-80 border-l border-neutral-800 bg-neutral-900/95 flex flex-col h-full overflow-hidden shrink-0 text-xs">
@@ -77,13 +98,21 @@ export const BlockDetailsPanel: React.FC<BlockDetailsPanelProps> = ({ block, onC
           <div className="space-y-2">
             <div>
               <span className="text-neutral-400 text-[11px]">Raw Text</span>
-              <div className="mt-1 p-2 bg-neutral-950/80 rounded border border-neutral-800 font-mono text-[11px] text-neutral-200 break-words whitespace-pre-wrap">
+              <div
+                data-testid="panel-raw-text"
+                {...hoverProps}
+                className={`mt-1 p-2 bg-neutral-950/80 rounded border border-neutral-800 font-mono text-[11px] text-neutral-200 break-words whitespace-pre-wrap ${hoverRing}`}
+              >
                 {block.raw_text || block.raw_value || "(No raw text payload)"}
               </div>
             </div>
 
             {block.normalized && (
-              <div className="p-2.5 bg-neutral-950/40 rounded border border-neutral-800 space-y-1">
+              <div
+                data-testid="panel-normalized"
+                {...hoverProps}
+                className={`p-2.5 bg-neutral-950/40 rounded border border-neutral-800 space-y-1 ${hoverRing}`}
+              >
                 <span className="text-[10px] text-neutral-500 font-semibold uppercase">Normalized Value</span>
                 <div className="font-mono text-neutral-100 text-xs">
                   {String(block.normalized.value)}

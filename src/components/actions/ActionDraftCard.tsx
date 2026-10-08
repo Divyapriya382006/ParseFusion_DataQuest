@@ -13,6 +13,7 @@ import {
 import type { ProposedAction } from "../../types/canonical";
 import { formatBackendDate } from "../../lib/formatters";
 import { useEvidence } from "../../context/EvidenceContext";
+import { EvidenceHover } from "../evidence/EvidenceHover";
 import { useAuth } from "../../context/AuthContext";
 import { CAPABILITY_KEYS } from "../../config/capabilityKeys";
 
@@ -211,15 +212,16 @@ export const ActionDraftCard: React.FC<ActionDraftCardProps> = ({
         <div className="pt-1 flex flex-wrap items-center gap-2">
           <span className="text-[10px] text-neutral-500">Supporting Evidence:</span>
           {action.supporting_evidence.map((ev, idx) => (
-            <button
-              key={idx}
-              type="button"
-              onClick={() => openEvidence(ev)}
-              className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-sky-400 hover:text-sky-300 font-mono text-[11px] transition-colors"
-            >
-              <Link2 className="w-3 h-3" />
-              <span>{ev.filename || ev.source_id} (p.{ev.page_number})</span>
-            </button>
+            <EvidenceHover key={idx} evidence={ev} focusable={false} openOnClick={false}>
+              <button
+                type="button"
+                onClick={() => openEvidence(ev)}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-sky-400 hover:text-sky-300 font-mono text-[11px] transition-colors"
+              >
+                <Link2 className="w-3 h-3" />
+                <span>{ev.filename || ev.source_id} (p.{ev.page_number})</span>
+              </button>
+            </EvidenceHover>
           ))}
         </div>
       )}

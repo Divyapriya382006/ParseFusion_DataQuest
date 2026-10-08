@@ -21,6 +21,12 @@ export function getApiBaseUrl(): string {
   return "";
 }
 
+export function getApiUrl(endpoint: string): string {
+  const cleanEndpoint = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
+  const baseUrl = getApiBaseUrl();
+  return baseUrl ? new URL(cleanEndpoint, `${baseUrl}/`).toString() : cleanEndpoint;
+}
+
 export interface RequestOptions {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   params?: Record<string, string | number | boolean | undefined | null>;
@@ -50,7 +56,7 @@ export async function apiClient<T>(
   }
 
   const cleanEndpoint = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
-  let url = `${baseUrl}${cleanEndpoint}`;
+  let url = getApiUrl(cleanEndpoint);
 
   if (options.params) {
     const searchParams = new URLSearchParams();

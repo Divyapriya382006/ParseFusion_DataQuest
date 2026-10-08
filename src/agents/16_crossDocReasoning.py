@@ -963,6 +963,11 @@ def run(inp: RunInput, *, request_id: Optional[str] = None) -> RunOutput:
         case_sources = {str(s) for s in (case.get("source_ids") or [])}
 
         raw = _store_get("facts", case_id)
+        if isinstance(raw, dict) and "enc" in raw:
+            # Agent 15 stores facts encrypted (AES-GCM + integrity hash); read them through its own loader.
+            import importlib
+            a15 = importlib.import_module("backend.agents.15_fact_normalizer")
+            raw = {"facts": [f.model_dump(mode="json") for f in a15.load_facts(case_id, request_id=request_id)]}
         if raw is None:
             raise _fail(ErrorCode.CONFLICT, "Facts are missing for this case; run the fact normalizer first.",
                         {"missing": ["facts"]})

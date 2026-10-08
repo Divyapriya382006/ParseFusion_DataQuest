@@ -3,6 +3,8 @@ import { Link2, AlertCircle } from "lucide-react";
 import type { NormalizedFact } from "../../agents/15_factNormalizer";
 import { useEvidence } from "../../context/EvidenceContext";
 import { ConfidenceIndicator } from "../common/ConfidenceIndicator";
+import { EvidenceHover } from "../evidence/EvidenceHover";
+import { HighlightScope } from "../evidence/HighlightScope";
 
 interface FactListProps {
   facts: NormalizedFact[];
@@ -18,8 +20,9 @@ export const FactList: React.FC<FactListProps> = ({ facts }) => {
   return (
     <div className="space-y-3">
       {facts.map((fact) => (
-        <div
+        <HighlightScope
           key={fact.fact_id}
+          evidences={fact.evidence}
           className="p-3.5 bg-neutral-950/60 border border-neutral-800 rounded-xl space-y-2 text-xs"
         >
           {/* Header */}
@@ -35,15 +38,17 @@ export const FactList: React.FC<FactListProps> = ({ facts }) => {
           <div className="grid grid-cols-2 gap-2 p-2 bg-neutral-900/80 rounded border border-neutral-800/80 font-mono text-[11px]">
             <div>
               <div className="text-[10px] text-neutral-500 uppercase font-sans">Raw Input</div>
-              <div className="text-neutral-300 truncate">{fact.raw_text || fact.raw_value}</div>
+              <EvidenceHover evidence={fact.evidence?.[0]} as="div" className="text-neutral-300 truncate">
+                {fact.raw_text || fact.raw_value}
+              </EvidenceHover>
             </div>
             <div>
               <div className="text-[10px] text-neutral-500 uppercase font-sans">Normalized</div>
-              <div className="text-neutral-100 font-semibold truncate">
+              <EvidenceHover evidence={fact.evidence?.[0]} as="div" className="text-neutral-100 font-semibold truncate">
                 {String(fact.normalized_value)}
                 {fact.currency && ` ${fact.currency}`}
                 {fact.unit && ` ${fact.unit}`}
-              </div>
+              </EvidenceHover>
             </div>
           </div>
 
@@ -67,19 +72,20 @@ export const FactList: React.FC<FactListProps> = ({ facts }) => {
             <div className="pt-1 flex flex-wrap items-center gap-2">
               <span className="text-[10px] text-neutral-500">Evidence:</span>
               {fact.evidence.map((ev, idx) => (
-                <button
-                  key={idx}
-                  type="button"
-                  onClick={() => openEvidence(ev)}
-                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-sky-400 hover:text-sky-300 font-mono text-[11px] transition-colors"
-                >
-                  <Link2 className="w-2.5 h-2.5" />
-                  <span>p.{ev.page_number}</span>
-                </button>
+                <EvidenceHover key={idx} evidence={ev} focusable={false} openOnClick={false}>
+                  <button
+                    type="button"
+                    onClick={() => openEvidence(ev)}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-sky-400 hover:text-sky-300 font-mono text-[11px] transition-colors"
+                  >
+                    <Link2 className="w-2.5 h-2.5" />
+                    <span>p.{ev.page_number}</span>
+                  </button>
+                </EvidenceHover>
               ))}
             </div>
           )}
-        </div>
+        </HighlightScope>
       ))}
     </div>
   );

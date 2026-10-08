@@ -179,6 +179,17 @@ export interface EvidenceReference {
   text_excerpt: string;
   bbox: [number, number, number, number] | null;
   confidence: number;
+  /** Optional fields. When the backend sends them, hover-to-source uses them instead of looking them up. */
+  page_id?: ID;
+  extraction_method?: string;
+  bbox_unavailable_reason?: string;
+  page_width?: number;
+  page_height?: number;
+  /** Backend-supplied cropped image of the region. When present, no client-side crop is drawn. */
+  crop_url?: string;
+  /** Restricted values: the popover shows a restricted message only. */
+  locked?: boolean;
+  masked?: boolean;
 }
 
 export interface ProposedAction {

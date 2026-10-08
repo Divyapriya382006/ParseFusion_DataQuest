@@ -40,6 +40,8 @@ for path in sorted(_agents_dir.glob("[0-9][0-9]_*.py")):
     try:
         mod = importlib.import_module(f"backend.agents.{name}")
         router = getattr(mod, "router", None)
+        if router is None and callable(getattr(mod, "build_router", None)):
+            router = mod.build_router()  # agents 15/16 expose a factory instead of a module-level router
         if router is None:
             FAILED[name] = "module has no `router`"
             continue

@@ -5,6 +5,7 @@ import { ThemeProvider } from "./context/ThemeContext";
 import { ConfigProvider } from "./context/ConfigContext";
 import { AuthProvider } from "./context/AuthContext";
 import { EvidenceProvider } from "./context/EvidenceContext";
+import { EvidenceHighlightProvider } from "./context/EvidenceHighlightContext";
 import { TopBar } from "./components/common/TopBar";
 import { Sidebar } from "./components/common/Sidebar";
 import { EvidenceModalViewer } from "./components/viewer/EvidenceModalViewer";
@@ -14,6 +15,7 @@ import { UploadPage } from "./pages/UploadPage";
 import { BatchProgressPage } from "./pages/BatchProgressPage";
 import { ResultsDashboardPage } from "./pages/ResultsDashboardPage";
 import { CaseReviewPage } from "./pages/CaseReviewPage";
+import { CaseAnalysisPage } from "./pages/CaseAnalysisPage";
 import { ActionsPage } from "./pages/ActionsPage";
 import { AccessControlPage } from "./pages/AccessControlPage";
 import { ChatPage } from "./pages/ChatPage";
@@ -39,6 +41,7 @@ export default function App() {
         <ConfigProvider>
           <AuthProvider>
             <EvidenceProvider>
+             <EvidenceHighlightProvider>
               <BrowserRouter>
                 <div className="flex flex-col h-screen w-screen overflow-hidden bg-neutral-950 text-neutral-100 font-sans selection:bg-sky-500/30 selection:text-white">
                   {/* Top Bar Contract (3 zones) */}
@@ -55,6 +58,7 @@ export default function App() {
                         <Route path="/batch" element={<BatchProgressPage />} />
                         <Route path="/dashboard" element={<ResultsDashboardPage />} />
                         <Route path="/cases" element={<CaseReviewPage />} />
+                        <Route path="/case-analysis" element={<CaseAnalysisPage />} />
                         <Route path="/actions" element={<ActionsPage />} />
                         <Route path="/access" element={<AccessControlPage />} />
                         <Route path="/chat" element={<ChatPage />} />
@@ -72,6 +76,7 @@ export default function App() {
                   <EvidenceModalViewer />
                 </div>
               </BrowserRouter>
+             </EvidenceHighlightProvider>
             </EvidenceProvider>
           </AuthProvider>
         </ConfigProvider>

@@ -2,6 +2,7 @@ import React from "react";
 import { ArrowLeftRight, Eye } from "lucide-react";
 import type { EvidenceReference } from "../../types/canonical";
 import { useEvidence } from "../../context/EvidenceContext";
+import { EvidenceHover } from "../evidence/EvidenceHover";
 
 interface SideBySideCompareProps {
   primary: EvidenceReference;
@@ -34,9 +35,13 @@ export const SideBySideCompare: React.FC<SideBySideCompareProps> = ({
             <div className="font-mono text-neutral-300 text-[11px] truncate mb-2">
               {primary.filename || primary.source_id}
             </div>
-            <div className="p-2.5 bg-neutral-900 rounded border border-neutral-800/80 font-mono text-neutral-100 text-xs">
+            <EvidenceHover
+              evidence={primary}
+              as="div"
+              className="p-2.5 bg-neutral-900 rounded border border-neutral-800/80 font-mono text-neutral-100 text-xs"
+            >
               "{primary.text_excerpt}"
-            </div>
+            </EvidenceHover>
           </div>
           <div className="mt-3 pt-2 border-t border-neutral-800/60 flex items-center justify-between">
             <span className="text-neutral-500 font-mono text-[11px]">
@@ -63,9 +68,13 @@ export const SideBySideCompare: React.FC<SideBySideCompareProps> = ({
             <div className="font-mono text-neutral-300 text-[11px] truncate mb-2">
               {secondary.filename || secondary.source_id}
             </div>
-            <div className="p-2.5 bg-neutral-900 rounded border border-neutral-800/80 font-mono text-neutral-100 text-xs">
+            <EvidenceHover
+              evidence={secondary}
+              as="div"
+              className="p-2.5 bg-neutral-900 rounded border border-neutral-800/80 font-mono text-neutral-100 text-xs"
+            >
               "{secondary.text_excerpt}"
-            </div>
+            </EvidenceHover>
           </div>
           <div className="mt-3 pt-2 border-t border-neutral-800/60 flex items-center justify-between">
             <span className="text-neutral-500 font-mono text-[11px]">

@@ -84,6 +84,12 @@ export const ResultsDashboardPage: React.FC = () => {
   // Aggregate blocks across all pages for typed tabs
   const allBlocks = pages.flatMap((p) => p.blocks || []);
   const tableBlocks = allBlocks.filter((b): b is TableBlock => b.type === "table");
+  // Each table with the page it sits on, so cells know their page and filename (hover-to-source)
+  const tableEntries = pages.flatMap((p) =>
+    (p.blocks || [])
+      .filter((b): b is TableBlock => b.type === "table")
+      .map((table) => ({ table, page: p }))
+  );
   const chartBlocks = allBlocks.filter((b): b is ChartBlock => b.type === "chart");
   const figureBlocks = allBlocks.filter((b): b is FigureBlock => b.type === "figure");
   const equationBlocks = allBlocks.filter((b): b is EquationBlock => b.type === "equation");
@@ -253,6 +259,7 @@ export const ResultsDashboardPage: React.FC = () => {
                     totalPages={pages.length}
                     currentPageNumber={currentPage.page_number}
                     onPageChange={(pNum) => setCurrentPageIndex(pNum - 1)}
+                    filename={sourceDoc?.filename}
                   />
                 ) : (
                   <div className="h-full flex items-center justify-center text-neutral-500 bg-neutral-950/40 rounded-xl">
@@ -266,8 +273,13 @@ export const ResultsDashboardPage: React.FC = () => {
           {/* Tab 2: Tables */}
           {activeTab === "tables" && (
             <div className="space-y-6">
-              {tableBlocks.map((tbl) => (
-                <TableRenderer key={tbl.table_id || tbl.block_id} table={tbl} />
+              {tableEntries.map(({ table: tbl, page: tblPage }) => (
+                <TableRenderer
+                  key={tbl.table_id || tbl.block_id}
+                  table={tbl}
+                  page={tblPage}
+                  filename={sourceDoc?.filename}
+                />
               ))}
             </div>
           )}

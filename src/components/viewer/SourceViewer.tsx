@@ -11,6 +11,7 @@ import {
 import type { PageUnit, Block } from "../../types/canonical";
 import { SvgOverlay } from "./SvgOverlay";
 import { BlockDetailsPanel } from "./BlockDetailsPanel";
+import { useBoxesForPage } from "../../context/EvidenceHighlightContext";
 
 interface SourceViewerProps {
   page: PageUnit;
@@ -18,6 +19,8 @@ interface SourceViewerProps {
   currentPageNumber: number;
   onPageChange?: (newPage: number) => void;
   highlightedBbox?: [number, number, number, number] | null;
+  /** Document name shown in hover-to-source popovers (PageUnit does not carry it). */
+  filename?: string;
   onClose?: () => void;
 }
 
@@ -27,9 +30,14 @@ export const SourceViewer: React.FC<SourceViewerProps> = ({
   currentPageNumber,
   onPageChange,
   highlightedBbox,
+  filename,
 }) => {
   const [zoom, setZoom] = useState(1);
   const [selectedBlock, setSelectedBlock] = useState<Block | null>(null);
+  // Two-way highlighting: the block hovered on the page or in the side panel.
+  const [hoveredBlockId, setHoveredBlockId] = useState<string | null>(null);
+  // Boxes of values hovered elsewhere in the app that point at this very page.
+  const contextBoxes = useBoxesForPage(page.source_id, page.page_number);
   const [showHeatmap, setShowHeatmap] = useState(false);
   const [showUncovered, setShowUncovered] = useState(false);
 
@@ -194,6 +202,11 @@ export const SourceViewer: React.FC<SourceViewerProps> = ({
               showHeatmap={showHeatmap}
               showUncovered={showUncovered}
               uncoveredRegions={page.uncovered_regions || []}
+              page={page}
+              filename={filename}
+              hoveredBlockId={hoveredBlockId}
+              onHoverBlock={setHoveredBlockId}
+              contextBoxes={contextBoxes}
             />
           </div>
         </div>
@@ -204,6 +217,10 @@ export const SourceViewer: React.FC<SourceViewerProps> = ({
         <BlockDetailsPanel
           block={selectedBlock}
           onClose={() => setSelectedBlock(null)}
+          page={page}
+          filename={filename}
+          hoveredBlockId={hoveredBlockId}
+          onHoverValue={setHoveredBlockId}
         />
       )}
     </div>

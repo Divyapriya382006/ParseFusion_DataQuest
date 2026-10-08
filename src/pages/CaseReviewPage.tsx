@@ -22,6 +22,7 @@ import { SideBySideCompare } from "../components/findings/SideBySideCompare";
 import { FactList } from "../components/findings/FactList";
 import { ComparisonList } from "../components/findings/ComparisonList";
 import { FindingCard } from "../components/findings/FindingCard";
+import { HighlightedPagesPreview } from "../components/evidence/HighlightedPagesPreview";
 import { Skeleton } from "../components/common/LoadingSkeleton";
 import { formatBackendDate } from "../lib/formatters";
 import type { EvidenceReference } from "../types/canonical";
@@ -262,6 +263,9 @@ export const CaseReviewPage: React.FC = () => {
             <Scale className="w-3.5 h-3.5 text-sky-400" />
             <span>Cross-Document Evidence Inspection</span>
           </div>
+
+          {/* Hover or focus a fact or finding: all of its evidence boxes light up on the source pages */}
+          <HighlightedPagesPreview />
 
           {activeComparePrimary && activeCompareSecondary ? (
             <SideBySideCompare

@@ -1,21 +1,51 @@
 import React from "react";
 import { Link2, ShieldAlert } from "lucide-react";
-import type { TableBlock, TableCell } from "../../types/canonical";
+import type { EvidenceReference, PageUnit, TableBlock, TableCell } from "../../types/canonical";
 import { LockedCell } from "../common/LockedCell";
 import { useEvidence } from "../../context/EvidenceContext";
+import { useBoxesForPage } from "../../context/EvidenceHighlightContext";
+import { EvidenceHover } from "../evidence/EvidenceHover";
+import { PageHighlightView } from "../evidence/PageHighlightView";
+import { isValidBbox } from "../../lib/evidence";
 
 interface TableRendererProps {
   table: TableBlock;
   onCellClick?: (cell: TableCell) => void;
   onRequestAccess?: (columnName?: string) => void;
+  /** Page the table sits on. Gives cells their page number and enables the linked page preview. */
+  page?: PageUnit;
+  filename?: string;
 }
 
 export const TableRenderer: React.FC<TableRendererProps> = ({
   table,
   onCellClick,
   onRequestAccess,
+  page,
+  filename,
 }) => {
   const { openEvidence } = useEvidence();
+  const pageBoxes = useBoxesForPage(table.source_id, page?.page_number);
+
+  const cellEvidence = (cell: TableCell): EvidenceReference | null => {
+    if (!page) return null;
+    const restricted = Boolean(cell.locked || table.locked);
+    return {
+      source_id: table.source_id,
+      filename: filename ?? "",
+      page_number: page.page_number,
+      page_id: page.page_id,
+      block_id: table.block_id,
+      text_excerpt: restricted ? "" : cell.raw_text,
+      bbox: isValidBbox(cell.location?.bbox) ? cell.location.bbox : null,
+      confidence: cell.confidence,
+      extraction_method: table.extraction_method,
+      bbox_unavailable_reason: cell.location?.bbox_unavailable_reason,
+      page_width: page.width,
+      page_height: page.height,
+      locked: restricted,
+    };
+  };
 
   // Compute table grid from cells or n_rows / n_cols
   const rows: TableCell[][] = [];
@@ -33,15 +63,17 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
     if (onCellClick) {
       onCellClick(cell);
     } else if (cell.location?.bbox) {
-      openEvidence({
-        source_id: table.source_id,
-        filename: "",
-        page_number: 1,
-        block_id: table.block_id,
-        text_excerpt: cell.raw_text,
-        bbox: cell.location.bbox,
-        confidence: cell.confidence,
-      });
+      openEvidence(
+        cellEvidence(cell) ?? {
+          source_id: table.source_id,
+          filename: filename ?? "",
+          page_number: page?.page_number ?? 1,
+          block_id: table.block_id,
+          text_excerpt: cell.raw_text,
+          bbox: cell.location.bbox,
+          confidence: cell.confidence,
+        }
+      );
     }
   };
 
@@ -148,11 +180,13 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
                         colSpan={cell.col_span || 1}
                         className="border border-neutral-800/60 p-1.5"
                       >
-                        <LockedCell
-                          compact
-                          label="Restricted"
-                          onRequestAccess={onRequestAccess ? () => onRequestAccess() : undefined}
-                        />
+                        <EvidenceHover evidence={cellEvidence(cell)} as="div" openOnClick={false} focusable>
+                          <LockedCell
+                            compact
+                            label="Restricted"
+                            onRequestAccess={onRequestAccess ? () => onRequestAccess() : undefined}
+                          />
+                        </EvidenceHover>
                       </td>
                     );
                   }
@@ -170,15 +204,22 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
                       }`}
                       title={`Confidence: ${Math.round(cell.confidence * 100)}% (Click to inspect source anchor)`}
                     >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="truncate">{cell.raw_text}</span>
-                        {cell.confidence < 0.7 && (
-                          <span
-                            className="w-1.5 h-1.5 rounded-full bg-rose-400 shrink-0"
-                            title="Manual review recommended"
-                          />
-                        )}
-                      </div>
+                      <EvidenceHover
+                        evidence={cellEvidence(cell)}
+                        as="div"
+                        openOnClick={false}
+                        onActivate={() => handleCellClick(cell)}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="truncate">{cell.raw_text}</span>
+                          {cell.confidence < 0.7 && (
+                            <span
+                              className="w-1.5 h-1.5 rounded-full bg-rose-400 shrink-0"
+                              title="Manual review recommended"
+                            />
+                          )}
+                        </div>
+                      </EvidenceHover>
                     </td>
                   );
                 })}
@@ -187,6 +228,22 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
           </tbody>
         </table>
       </div>
+
+      {/* Linked page preview: the hovered cell's box is drawn on the page it was read from */}
+      {page && !table.locked && (
+        <details open className="max-w-sm" data-testid="table-page-preview">
+          <summary className="cursor-pointer text-[11px] text-neutral-400 mb-1.5">
+            Source page {page.page_number}
+          </summary>
+          <PageHighlightView
+            imageUrl={page.image_url}
+            pageWidth={page.width}
+            pageHeight={page.height}
+            outline={isValidBbox(table.location?.bbox) ? table.location.bbox : null}
+            boxes={pageBoxes}
+          />
+        </details>
+      )}
     </div>
   );
 };

@@ -109,7 +109,8 @@ _DEFAULTS: Dict[str, Any] = {
     "ocr": {"engines": ["paddleocr", "tesseract"], "timeout_s": 90, "psm_page": 3, "psm_region": 6,
             "default_langs": "eng", "retry_conf_threshold": 0.80, "deskew_min_deg": 0.3, "deskew_max_deg": 5.0,
             "region_pad_px": 8, "region_min_height_px": 96, "region_max_upscale": 3.0, "handwriting_max_lines": 40,
-            "handwriting_cv_threshold": 0.85, "handwriting_low_conf_fraction": 0.4, "workers": 2,
+            "handwriting_cv_threshold": 0.85, "handwriting_low_conf_fraction": 0.4,
+            "workers": max(2, (os.cpu_count() or 2) - 1),  # OCR runs in parallel across pages
             "script_langs": {
                 "Latin": {"tesseract": "eng", "paddle": "en"}, "Devanagari": {"tesseract": "hin+eng", "paddle": "devanagari"},
                 "Bengali": {"tesseract": "ben+eng", "paddle": "bn"}, "Gujarati": {"tesseract": "guj+eng", "paddle": "gu"},

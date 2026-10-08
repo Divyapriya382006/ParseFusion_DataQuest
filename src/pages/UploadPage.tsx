@@ -457,6 +457,9 @@ export const UploadPage: React.FC = () => {
           <label className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider block">
             Target Output Formats
           </label>
+          <p className="text-[11px] text-neutral-500">
+            Each selected format will be generated as a downloadable export when processing finishes.
+          </p>
           <div className="flex flex-wrap gap-2">
             {config.output_formats.map((fmt) => {
               const isChecked = selectedFormats.includes(fmt.id);
