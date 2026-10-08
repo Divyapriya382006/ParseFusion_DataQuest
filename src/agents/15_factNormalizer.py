@@ -149,6 +149,8 @@ class Fact(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     ambiguity_notes: Optional[List[str]] = None
     evidence: List[EvidenceReference] = Field(min_length=1)
+    # where the value came from: {type: table_cell|key_value|text, table_id?, row_label?, column_headers?, row?, col?}
+    origin: Optional[Dict[str, Any]] = None
 
 
 class FactNormalizerInput(BaseModel):
@@ -160,6 +162,10 @@ class FactNormalizerOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     facts: List[Fact]
     warnings: List[WarningItem] = Field(default_factory=list)
+    # Per-document accounting: candidates, accepted, skipped (by reason), unclassified numbers, zero_fact_reason.
+    documents: List[Dict[str, Any]] = Field(default_factory=list)
+    # Every candidate that was considered but not turned into a fact, with the reason.
+    skipped_candidates: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class _LabelProposal(BaseModel):
@@ -752,6 +758,16 @@ class _Run:
     missing_conf: float = 0.5
     excerpt_max: int = 300
     use_llm: bool = False
+    skipped: List[dict] = field(default_factory=list)
+    doc_stats: Dict[str, Dict[str, int]] = field(default_factory=lambda: defaultdict(lambda: defaultdict(int)))
+
+    def skip(self, source_id: str, ref_id: str, reason_code: str, failing_field: Optional[str], raw_text: str) -> None:
+        """Record a candidate that was considered but not kept as a fact (never dropped silently)."""
+        self.doc_stats[source_id]["skipped"] += 1
+        self.doc_stats[source_id][f"skipped:{reason_code}"] += 1
+        if len(self.skipped) < int(_cfg("fact_normalizer.max_skipped_listed", 2000)):
+            self.skipped.append({"source_id": source_id, "ref_id": ref_id, "reason_code": reason_code,
+                                 "failing_field": failing_field, "raw_text": mask_sensitive(raw_text)[0][:200]})
 
     def warn(self, code: str, message: str, **details: Any) -> None:
         cap = int(_cfg("fact_normalizer.max_warnings", 500))
@@ -789,6 +805,7 @@ class _Cand:
     origin: str
     headers: List[str] = field(default_factory=list)
     sibling_value_cols: int = 1
+    origin_info: Dict[str, Any] = field(default_factory=dict)
 
 
 def _loc(holder: dict, block: dict) -> Tuple[Optional[List[float]], Optional[float], Optional[float]]:
@@ -852,7 +869,7 @@ def _split_label_value(line: str) -> Optional[Tuple[str, str, str]]:
     line = re.sub(r"^\s*(?:[-•*]|\d+[.)])\s+", "", line)
     if ":" in line:
         a, b = line.split(":", 1)
-        return a.strip(), b.strip(), "kv"
+        return a.strip(), b.strip(), "colon"
     m = re.search(r"\s*(?:=|\s[-–—]\s|\.{3,}|\t|\s{2,})\s*", line)
     if m:
         return line[:m.start()].strip(), line[m.end():].strip(), "kv"
@@ -866,6 +883,42 @@ def _label_ok(label: str) -> bool:
     words = label.split()
     return (1 <= len(words) <= 8 and bool(re.search(r"[A-Za-z]", label)) and not _label_is_identifier(label)
             and not _label_is_sensitive_attr(label))
+
+
+_CODE_CHARS = re.compile(r"[\[\]{}<>=+*\;^|]|:=|->|\b(?:for|if|while|return|else|elif|endif|endfor)\b", re.I)
+
+
+def _label_names_measure(label: str) -> bool:
+    """A label names what it measures: mostly real words (>= 3 letters), no code/math syntax.
+    Rejects matrix row labels ('a', 'B'), pseudocode ('dist i i', 'for k = 1'), formulas."""
+    if _CODE_CHARS.search(label):
+        return False
+    toks = re.findall(r"[A-Za-z]+", label)
+    words = [t for t in toks if len(t) >= 3]
+    return bool(words) and len(words) / len(toks) >= 0.5
+
+
+def _value_has_context(value: str, ctx: "_Run") -> bool:
+    """The value carries a currency, unit, percentage or date of its own."""
+    if parse_date_value(value, ctx.date_order):
+        return True
+    pv = parse_value(value, ctx.locale)
+    return bool(pv and (pv.currency or pv.currency_candidates or pv.unit or pv.percent))
+
+
+def _fact_worthy(c: "_Cand", sep: str, dctx: "_DocCtx", ctx: "_Run") -> bool:
+    """Gate: a fact needs a label naming what it measures AND (a unit/currency/period/entity or a recognised
+    key-value structure). Everything else is counted as an unclassified number, not a fact."""
+    if not _label_names_measure(c.label):
+        return False
+    if _value_has_context(c.value_text, ctx):
+        return True
+    if any(find_period(t, ctx.date_order) for t in [c.label, *c.headers]):
+        return True
+    if c.origin == "table":
+        # a table cell with a worded row label under a worded column header is a recognised structure
+        return any(_label_names_measure(h) for h in c.headers) or c.sibling_value_cols == 1
+    return sep == "colon" or dctx.subject is not None
 
 
 def _handle_context_line(label: str, value: str, ev: EvidenceReference, dctx: _DocCtx, ctx: _Run) -> bool:
@@ -923,7 +976,10 @@ def _table_candidates(src: str, page_id: str, block: dict, ctx: _Run, dctx: _Doc
                 label=label, value_text=clean_text(c.get("raw_text")),
                 line_text=f"{label} | {clean_text(c.get('raw_text'))}", origin="table",
                 headers=[t for rr, t in col_headers.get(int(c.get("col", 0)), []) if rr < r and t],
-                sibling_value_cols=len(value_cells)))
+                sibling_value_cols=len(value_cells),
+                origin_info={"type": "table_cell", "table_id": str(block.get("table_id") or block.get("block_id")),
+                             "row_label": label, "row": r, "col": int(c.get("col", 0)),
+                             "column_headers": [t for rr, t in col_headers.get(int(c.get("col", 0)), []) if rr < r and t]}))
     return cands
 
 
@@ -995,6 +1051,7 @@ def _build_fact(c: _Cand, dctx: _DocCtx, ctx: _Run, conf_by_block: Dict[str, dic
         ctx.warn("SENSITIVE_VALUE_SKIPPED", "value looks like a sensitive identifier; not stored as a fact",
                  source_id=c.source_id, block_id=c.block_id, kinds=sorted({k for _, _, k in value_spans}))
         ctx.stats["sensitive_value_skipped"] += 1
+        ctx.skip(c.source_id, c.block_id, "SENSITIVE_VALUE", "value", c.line_text)
         return None
     if kinds:
         ctx.stats["sensitive_masked"] += 1
@@ -1005,8 +1062,7 @@ def _build_fact(c: _Cand, dctx: _DocCtx, ctx: _Run, conf_by_block: Dict[str, dic
     date_hit = parse_date_value(c.value_text, ctx.date_order)
     pv = None if date_hit else parse_value(c.value_text, ctx.locale)
     if not date_hit and pv is None:
-        ctx.warn("VALUE_UNPARSEABLE", "candidate value could not be normalised; skipped",
-                 source_id=c.source_id, block_id=c.block_id)
+        ctx.skip(c.source_id, c.block_id, "VALUE_UNPARSEABLE", "value", c.line_text)
         return None
     currency = unit = None
     if date_hit:
@@ -1090,11 +1146,12 @@ def _build_fact(c: _Cand, dctx: _DocCtx, ctx: _Run, conf_by_block: Dict[str, dic
             notes.append("period unresolved; manual review recommended")
         if period.ambiguous and any("ambiguous" in n for n in period.notes):
             pens.append(P["date_order_assumed"])
+    header_part = None
     for h in c.headers:
         if _header_leftover(h) and c.sibling_value_cols > 1:
-            notes.append(f"column header '{clean_text(h)[:60]}' was not interpreted (may identify a party or "
-                         "category); manual review recommended")
-            pens.append(P["header_uninterpreted"])
+            header_part = clean_text(h)[:60]
+            notes.append(f"metric includes the column header '{header_part}' (it may name a party or category); "
+                         "manual review recommended")
             break
 
     # ---- subject
@@ -1109,13 +1166,12 @@ def _build_fact(c: _Cand, dctx: _DocCtx, ctx: _Run, conf_by_block: Dict[str, dic
             pens.append(P["multi_party_doc"])
 
     # ---- metric
-    metric = canonical_metric(c.label, ctx.synonyms) if c.label else None
+    metric = canonical_metric(f"{c.label} / {header_part}" if header_part else c.label, ctx.synonyms) if c.label else None
     llm_note = None
     if metric is None:
         metric, llm_note = _llm_label(c, masked_line, ctx)
         if metric is None:
-            ctx.warn("FACT_NO_LABEL", "value has no usable label; skipped", source_id=c.source_id,
-                     block_id=c.block_id)
+            ctx.skip(c.source_id, c.block_id, "NO_USABLE_LABEL", "metric", c.line_text)
             return None
         metric = canonical_metric(metric, ctx.synonyms) or metric
         notes.append(llm_note or "")
@@ -1166,20 +1222,30 @@ def _build_fact(c: _Cand, dctx: _DocCtx, ctx: _Run, conf_by_block: Dict[str, dic
                 normalized_value=normalized, currency=currency, unit=unit, frequency=frequency,
                 period_start=pstart, period_end=pend, category=category, basis=basis,
                 normalization_rule="+".join(dict.fromkeys(rules)), confidence=conf,
-                ambiguity_notes=[n for n in dict.fromkeys(notes) if n] or None, evidence=evidence)
+                ambiguity_notes=[n for n in dict.fromkeys(notes) if n] or None, evidence=evidence,
+                origin=c.origin_info or {"type": "key_value" if c.origin == "colon" else
+                                         ("text" if c.origin != "sentence" else "sentence")})
 
 
 def _verify_fact(f: Fact, texts: Dict[Tuple[str, str], str], ctx: _Run) -> bool:
     """Independent verification pass: grounding in the evidence text + re-derivation of the value."""
+    ok = _verify_fact_inner(f, texts, ctx)
+    if ok is not True:
+        e = f.evidence[0]
+        ctx.skip(e.source_id, e.block_id, ok, "evidence" if ok.startswith("UNGROUNDED") else "normalized_value",
+                 f.raw_text)
+        return False
+    return True
+
+
+def _verify_fact_inner(f: Fact, texts: Dict[Tuple[str, str], str], ctx: _Run):
     for e in f.evidence:
         if (e.source_id, e.block_id) not in texts:
-            ctx.warn("UNGROUNDED_OUTPUT", "evidence block not found; fact dropped", fact_id=f.fact_id)
-            return False
+            return "UNGROUNDED_EVIDENCE_BLOCK"
     primary = f.evidence[0]
     hay = _cmp(texts[(primary.source_id, primary.block_id)])
     if _cmp(f.raw_value) not in hay and not _sensitive_spans(f.raw_value):
-        ctx.warn("UNGROUNDED_OUTPUT", "raw value not found in its evidence block; fact dropped", fact_id=f.fact_id)
-        return False
+        return "UNGROUNDED_VALUE"
     if isinstance(f.normalized_value, str):
         d = parse_date_value(f.raw_value, ctx.date_order)
         ok = bool(d) and d[0] == f.normalized_value
@@ -1190,12 +1256,9 @@ def _verify_fact(f: Fact, texts: Dict[Tuple[str, str], str], ctx: _Run) -> bool:
         pv = parse_value(f.raw_value, ctx.locale)
         ok = pv is not None and pv.number is not None and float(pv.number) == f.normalized_value
     if not ok:
-        ctx.warn("NORMALIZATION_MISMATCH", "re-derived value differs from stored value; fact dropped",
-                 fact_id=f.fact_id)
-        return False
+        return "NORMALIZATION_MISMATCH"
     if f.period_start and f.period_end and f.period_start > f.period_end:
-        ctx.warn("NORMALIZATION_MISMATCH", "period start after end; fact dropped", fact_id=f.fact_id)
-        return False
+        return "PERIOD_INVALID"
     return True
 
 
@@ -1203,6 +1266,8 @@ def _extract_source(src: str, doc: dict, conf_by_block: Dict[str, dict], ctx: _R
                     texts: Dict[Tuple[str, str], str]) -> List[Fact]:
     dctx = _DocCtx()
     facts: List[Fact] = []
+    stats = ctx.doc_stats[src]
+    stats["text_blocks"] += 0
     for _, page_id, block in _iter_blocks(doc):
         bid = str(block.get("block_id"))
         ctx.stats["blocks_scanned"] += 1
@@ -1214,6 +1279,8 @@ def _extract_source(src: str, doc: dict, conf_by_block: Dict[str, dict], ctx: _R
             continue
         full = _block_text(block)
         texts[(src, bid)] = full
+        if full.strip():
+            stats["text_blocks"] += 1
         if _scan_text(src, block, full, ctx, "block"):
             continue
         cands: List[_Cand] = []
@@ -1224,6 +1291,9 @@ def _extract_source(src: str, doc: dict, conf_by_block: Dict[str, dict], ctx: _R
                     cell["raw_text"] = ""
             cands = [c for c in _table_candidates(src, page_id, block, ctx, dctx)
                      if not _scan_text(src, block, c.line_text, ctx, "cell")]
+            worthy = [c for c in cands if _fact_worthy(c, "table", dctx, ctx)]
+            stats["unclassified_numbers"] += len(cands) - len(worthy)
+            cands = worthy
         else:
             for raw_line in full.split("\n"):
                 line = clean_text(raw_line)
@@ -1236,17 +1306,44 @@ def _extract_source(src: str, doc: dict, conf_by_block: Dict[str, dict], ctx: _R
                 ev = _evidence(src, page_id, block, block, mask_sensitive(line)[0], ctx, _conf(block.get("confidence")))
                 if _handle_context_line(label, value, ev, dctx, ctx):
                     continue
-                if not _label_ok(label):
-                    continue
                 if not (re.search(r"\d", value)):
                     continue
-                cands.append(_Cand(src, page_id, bid, block, block, label, value, line,
-                                   "sentence" if origin == "sentence" else "text"))
+                if not _label_ok(label):
+                    stats["unclassified_numbers"] += 1
+                    continue
+                cand = _Cand(src, page_id, bid, block, block, label, value, line,
+                             "sentence" if origin == "sentence" else ("colon" if origin == "colon" else "text"))
+                if not _fact_worthy(cand, origin, dctx, ctx):
+                    stats["unclassified_numbers"] += 1
+                    continue
+                cands.append(cand)
         for c in cands:
+            stats["candidates"] += 1
             f = _build_fact(c, dctx, ctx, conf_by_block)
             if f is not None and _verify_fact(f, texts, ctx):
                 facts.append(f)
     return facts
+
+
+def _doc_report(src: str, accepted: int, ctx: _Run) -> Dict[str, Any]:
+    st = ctx.doc_stats.get(src, {})
+    skipped = sorted(({"reason_code": k.split(":", 1)[1], "count": int(v)} for k, v in st.items()
+                      if k.startswith("skipped:")), key=lambda d: (-d["count"], d["reason_code"]))
+    out: Dict[str, Any] = {"source_id": src, "candidates": int(st.get("candidates", 0)), "accepted": accepted,
+                           "skipped_total": int(st.get("skipped", 0)), "skipped": skipped,
+                           "unclassified_numbers": int(st.get("unclassified_numbers", 0))}
+    if accepted == 0:
+        if not st.get("text_blocks"):
+            out["zero_fact_reason"] = "no text was extracted from this document"
+        elif out["candidates"] == 0 and out["unclassified_numbers"]:
+            out["zero_fact_reason"] = (f"no labeled values found: {out['unclassified_numbers']} number(s) had no label "
+                                       "naming what they measure (e.g. matrix cells, formulas) and were not treated as facts")
+        elif out["candidates"] == 0:
+            out["zero_fact_reason"] = "no labeled values found"
+        else:
+            out["zero_fact_reason"] = f"all {out['candidates']} candidate(s) were skipped: " + ", ".join(
+                f"{d['reason_code']} x{d['count']}" for d in skipped)
+    return out
 
 
 # ----------------------------------------------------------------------------------------------
@@ -1396,7 +1493,12 @@ def run(inp: FactNormalizerInput, *, request_id: Optional[str] = None) -> FactNo
         except Exception as exc:  # audit failed -> roll the state change back, fail closed
             store.put("facts", case_id, previous if previous else {"revoked": True})
             raise _err("ENGINE_FAILED", "audit write failed; no facts were saved") from exc
-        return FactNormalizerOutput(facts=facts, warnings=ctx.warnings)
+        per_doc: Dict[str, int] = defaultdict(int)
+        for f in facts:
+            per_doc[f.evidence[0].source_id] += 1
+        documents = [_doc_report(sid, per_doc.get(sid, 0), ctx) for sid in sorted(docs)]
+        return FactNormalizerOutput(facts=facts, warnings=ctx.warnings, documents=documents,
+                                    skipped_candidates=ctx.skipped)
     except AgentError as exc:
         _audit_failure(ctx, case_id, getattr(exc, "code", "ENGINE_FAILED"), t0)
         raise
@@ -1441,4 +1543,4 @@ def build_router():
                 "error": {"code": code, "message": getattr(exc, "message", str(exc)),
                           "details": getattr(exc, "details", None)}})
 
-    return router
+    return router

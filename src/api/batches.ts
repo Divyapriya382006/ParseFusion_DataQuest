@@ -38,3 +38,8 @@ export async function retryBatchSource(batchId: ID, sourceId: ID): Promise<{ job
     body: { source_id: sourceId },
   });
 }
+
+/** (Re)run fact normalization + cross-document reasoning over a finished batch. */
+export async function analyzeBatch(batchId: ID): Promise<BatchSummary> {
+  return apiClient<BatchSummary>(`/batches/${batchId}/analyze`, { method: "POST" });
+}

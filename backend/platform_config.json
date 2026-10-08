@@ -56,6 +56,23 @@
     "max_cross_check_pages": 200,
     "max_region_rechecks_per_page": 60
   },
+  "doc_types": {
+    "salary certificate / payslip": ["salary certificate", "payslip", "pay slip", "employee name", "pay period", "net salary", "gross salary"],
+    "bank statement": ["bank statement", "account holder", "statement period", "closing balance", "opening balance", "account number"],
+    "invoice": ["invoice", "invoice number", "bill to", "gstin", "amount due", "tax invoice"],
+    "loan / credit application": ["loan application", "applicant", "loan amount", "tenure", "borrower"],
+    "income certificate": ["income certificate", "annual income", "issued by"],
+    "financial statements": ["balance sheet", "profit and loss", "revenue", "ebitda", "total assets"],
+    "term sheet": ["term sheet", "valuation", "investment amount", "liquidation preference"],
+    "lecture slides / technical notes": ["algorithm", "complexity", "lecture", "theorem", "proof", "graph", "vertices"]
+  },
+  "parse_score": {
+    "caps": {
+      "UNUSABLE_TEXT_LAYER": 0.5,
+      "OCR_FAILED": 0.7,
+      "CONFIDENCE_NOT_CROSS_CHECKED": 0.85
+    }
+  },
   "agents": {
     "reasoning": {
       "tolerance_abs": 0.01,

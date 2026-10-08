@@ -110,7 +110,7 @@ class EvidenceReference(_M):
 
 class Fact(_M):  # produced by agent 15
     fact_id: str
-    subject: str
+    subject: Optional[str] = None  # facts without a named subject are reported, never silently dropped
     metric: str
     raw_text: str
     raw_value: Optional[Union[int, float, str]] = None
@@ -126,6 +126,7 @@ class Fact(_M):  # produced by agent 15
     confidence: float = Field(ge=0, le=1)
     ambiguity_notes: Optional[Union[str, list[str]]] = None
     evidence: list[EvidenceReference] = Field(default_factory=list)
+    origin: Optional[dict] = None
 
 
 class Check(_M):
@@ -410,6 +411,10 @@ def _excerpt_in(excerpt: str, block_text: str) -> bool:
     if not e:
         return False
     if e in b:
+        return True
+    # table-cell evidence is "row label | cell value": each part must be in the table block's text
+    parts = [p for p in (_match_norm(x) for x in excerpt.split("|")) if p]
+    if len(parts) > 1 and all(p in b for p in parts):
         return True
     return len(e) >= 8 and fuzz.partial_ratio(e, b) >= 95
 
@@ -812,7 +817,11 @@ def _reason(case_id: str, case_sources: set[str], raw_facts: list, cfg: _Cfg, se
 
     # ---- grouping + pairwise comparison -----------------------------------------------------------
     groups: dict[tuple[str, str], list[_VF]] = defaultdict(list)
+    unnamed: dict[str, list[_VF]] = defaultdict(list)  # metric -> facts with no named subject
     for v in verified:
+        if not (facts[v.fact.fact_id].subject or "").strip():
+            unnamed[_match_norm(facts[v.fact.fact_id].metric)].append(v)
+            continue
         groups[(_match_norm(facts[v.fact.fact_id].subject), _match_norm(facts[v.fact.fact_id].metric))].append(v)
 
     comparisons: list[Comparison] = []
@@ -825,6 +834,16 @@ def _reason(case_id: str, case_sources: set[str], raw_facts: list, cfg: _Cfg, se
             checks=[Check(name="content_safety", status="fail",
                           detail="Instruction-like text matched safety rules (" + ", ".join(rules) + "); fact excluded from comparison.")],
             reason="Quarantined for manual review: instruction-like text found in the source fact."))
+
+    # Same attribute in different documents but no named subject: the pair was considered and rejected (explicitly).
+    for mkey in sorted(unnamed):
+        members = sorted(unnamed[mkey], key=lambda v: (v.primary, v.fact.fact_id))
+        for a, b in [(a, b) for a, b in itertools.combinations(members, 2) if not (a.sources & b.sources)][: cfg.max_pairs]:
+            not_comparable.append(NotComparable(
+                subject="(not named)", metric=a.metric, fact_ids=sorted([a.fact.fact_id, b.fact.fact_id]),
+                checks=[Check(name="subject_named", status="fail",
+                              detail="Neither document names the person or party this value belongs to.")],
+                reason="Not comparable: no named subject in either document; values are only compared for the same subject."))
 
     for key in sorted(groups):
         members = sorted(groups[key], key=lambda v: (v.primary, v.fact.fact_id))
@@ -1360,4 +1379,4 @@ def test_router_envelope(monkeypatch):
     assert r.status_code == 200 and r.json()["ok"] is True and r.json()["request_id"]
     bad = c.post("/agents/cross-doc-reasoning", json={"case_id": "x y"})
     assert bad.status_code == 400 and bad.json()["error"]["code"] == "INVALID_INPUT"
-    assert c.post("/agents/cross-doc-reasoning", json={"case_id": "missing"}).status_code == 404
+    assert c.post("/agents/cross-doc-reasoning", json={"case_id": "missing"}).status_code == 404

@@ -483,3 +483,34 @@ All endpoints use the standard JSON envelope unless binary upload/download is sp
     "citations": []
   }
   ```
+
+### Case analysis and reasoning report (sections 2-4 of the pipeline page)
+- **Endpoints:**
+  - `POST /cases/{case_id}/analyze`: runs agent 15 (facts) and agent 16 (cross-document reasoning) and returns `{case_id, analyzed_at, stages, final, report}`. Batches with two or more documents run this automatically once parsing finishes (`POST /batches/{id}/analyze` re-runs it).
+  - `GET /cases/{case_id}/analysis`: the last analysis.
+  - `GET /cases/{case_id}/reasoning-report`: the `report` part only.
+- **Fact (agent 15)** adds `origin: {type: "table_cell"|"key_value"|"text"|"sentence", table_id?, row_label?, column_headers?, row?, col?}`. Cell facts build their metric from the row label and an uninterpreted column header.
+- **Fact gate:** a value becomes a fact only if its label names what it measures (mostly words of 3+ letters, no code or math syntax) AND it has a unit, currency, percentage, date or period, a named subject, a `Label: value` structure, or a worded table header. Other numbers are counted as `unclassified_numbers`.
+- **Agent 15 output** adds `documents: [{source_id, candidates, accepted, skipped_total, skipped: [{reason_code, count}], unclassified_numbers, zero_fact_reason?}]` and `skipped_candidates: [{source_id, ref_id, reason_code, failing_field, raw_text}]`. Reason codes: `SENSITIVE_VALUE`, `VALUE_UNPARSEABLE`, `NO_USABLE_LABEL`, `UNGROUNDED_EVIDENCE_BLOCK`, `UNGROUNDED_VALUE`, `NORMALIZATION_MISMATCH`, `PERIOD_INVALID`.
+- **Agent 16** accepts facts without a subject. A pair with the same attribute but no named subject is listed in `not_comparable` with the failed check `subject_named`.
+- **report:**
+  ```json
+  {
+    "documents": [{"source_id": "", "filename": "", "parse": {"pages": 1, "blocks": 6, "tables": 0, "figures": 0, "route": "pdf_native",
+                   "blocks_by_method": {}, "needs_review": 0, "unverified_blocks": 0, "warning_counts": [{"code": "", "message": "", "count": 1}]},
+                   "parse_score": {"value": 0.95, "components": {"mean_block_confidence": 0.95, "mean_ocr_agreement": 0.9, "mean_reading_order_confidence": 1.0},
+                                   "cap": {"applied": false, "max": 0.7, "reason": "OCR_FAILED reported for this document", "config_key": "parse_score.caps.OCR_FAILED"}},
+                   "facts": {"candidates": 3, "accepted": 3, "skipped_total": 0, "skipped": [], "unclassified_numbers": 0, "zero_fact_reason": null}}],
+    "skipped_candidates": [],
+    "relatedness": [{"source_a": "", "source_b": "", "score": 0.75, "signals": [{"name": "same subject", "matched": true, "detail": "ravi kumar"}]}],
+    "not_comparable_summary": [{"reason_code": "BASIS_MATCH", "count": 1, "example": "Not comparable: Bases differ: gross vs net.", "example_fact_ids": [["", ""]]}],
+    "dropped_by_reasoning": [{"code": "VALUE_NOT_IN_EVIDENCE", "count": 1}],
+    "no_pairs_reason": null,
+    "unlock": ["1 pair(s) rejected by the 'basis_match' check"],
+    "case_score": {"status": "scored", "value": 0.7, "components": {"finding 1 (...)": 0.7}, "formula_description": "mean of finding scores; ..."},
+    "counts": {"documents": 2, "facts_accepted": 6, "facts_skipped": 0, "unclassified_numbers": 0, "pairs_considered": 3, "comparable": 2, "not_comparable": 1, "findings": 1},
+    "reconciliation": [{"check": "comparable + not comparable = pairs considered", "ok": true, "detail": "2 + 1 = 3"}]
+  }
+  ```
+- **Final:** when nothing is comparable, `case_score.status` is `"not_scored"`, `value` is `null` and `reason` says why. `final.verdict` is then `"not_scored"` and `final.confidence` is `null`, never 0.
+- **Parse score caps:** `backend/platform_config.json` → `parse_score.caps` maps warning codes (`UNUSABLE_TEXT_LAYER`, `OCR_FAILED`, `CONFIDENCE_NOT_CROSS_CHECKED`) to a maximum score. When a cap applies, native-text blocks that were not cross-checked count as needing review.

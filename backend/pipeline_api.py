@@ -24,6 +24,7 @@ from __future__ import annotations
 import importlib
 import re
 import threading
+from collections import defaultdict
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -41,6 +42,7 @@ router = APIRouter()
 # Separate pools so a source never waits for a page slot held by another source's pages.
 _SOURCE_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pf-source")
 _PAGE_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="pf-page")
+_ANALYSIS_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pf-analysis")
 
 _LOCK = threading.RLock()
 _BATCHES: Dict[str, dict] = {}
@@ -483,9 +485,11 @@ def _sync_case(case_id: str) -> None:
         case = _CASES.get(case_id)
         if not case:
             return
-        record = {**case, "tenant_id": case.get("tenant_id") or _user().get("tenant_id")}
+        # Agents 15/16 only see sources whose parsing completed (failed or running ones would break them).
+        parsed = [sid for sid in case.get("source_ids", []) if _SOURCES.get(sid, {}).get("status") == "completed"]
+        record = {**case, "source_ids": parsed, "tenant_id": case.get("tenant_id") or _user().get("tenant_id")}
         links = [{"case_id": case_id, "source_id": sid, "human_verified": True, "status": "confirmed",
-                  "method": "assigned_by_user"} for sid in case.get("source_ids", [])]
+                  "method": "assigned_by_user"} for sid in parsed]
     store = _store()
     store.put("case", case_id, {**record, "links": links})
     store.put("cases", case_id, record)
@@ -542,6 +546,10 @@ def _restore() -> None:
             if not isinstance(b, dict):
                 continue
             _BATCHES[bid] = b
+            if (b.get("analysis") or {}).get("status") in ("pending", "running"):
+                b["analysis"] = {"status": "failed", "case_id": b.get("case_id"),
+                                 "error": {"code": "INTERRUPTED", "message": "Cross-document reasoning was interrupted by a backend restart. Run it again."}}
+                _save(_P_BATCH, bid, b)
             if b.get("job_id"):
                 _JOBS[b["job_id"]] = bid
             if b.get("status") in ("queued", "running"):
@@ -757,6 +765,12 @@ def _refresh_batch(batch_id: str) -> None:
     _save_batch(batch_id)
     if generate_exports:
         _generate_batch_exports(batch_id)
+    with _LOCK:
+        b = _BATCHES.get(batch_id)
+        start_analysis = bool(b) and (b.get("analysis") or {}).get("status") == "pending" and all(
+            _SOURCES.get(s, {}).get("status") in ("completed", "failed") for s in b["source_ids"])
+    if start_analysis:
+        _start_batch_analysis(batch_id)
 
 
 def _batch_view(b: dict) -> dict:
@@ -765,11 +779,16 @@ def _batch_view(b: dict) -> dict:
     if b.get("case_id"):
         out["case_id"] = b["case_id"]
     out["job_id"] = b["job_id"]
-    out["sources"] = [
-        {"source_id": s, "status": _SOURCES.get(s, {}).get("status", "queued"),
-         "stage": _SOURCES.get(s, {}).get("stage", "queued"), "error": _SOURCES.get(s, {}).get("error")}
-        for s in b["source_ids"]
-    ]
+    out["analysis"] = b.get("analysis") or {"status": "not_run"}
+    out["sources"] = []
+    for s in b["source_ids"]:
+        st = _SOURCES.get(s, {})
+        item = {"source_id": s, "status": st.get("status", "queued"), "stage": st.get("stage", "queued"),
+                "error": st.get("error"), "filename": (_meta(s) or {}).get("sanitized_filename", "")}
+        if st.get("pages"):
+            # What parsing produced so far (pages, blocks by type/method, confidence, review load, warnings).
+            item["parse"] = _source_summary(s)
+        out["sources"].append(item)
     return out
 
 
@@ -808,6 +827,7 @@ def create_batch(body: CreateBatchIn):
             "status": "queued", "stage": "queued", "progress_percent": 0, "source_ids": source_ids,
             "case_id": body.case_id, "mode": body.mode, "output_formats": output_formats,
             "sources_summary": {"total": len(source_ids), "completed": 0, "failed": 0},
+            "analysis": {"status": "pending"},
         }
         _JOBS[job_id] = batch_id
         for s in source_ids:
@@ -827,8 +847,24 @@ def create_batch(body: CreateBatchIn):
     return _ok({"batch_id": batch_id, "job_id": job_id, "status": "queued"})
 
 
+def _start_missing_analyses(batch_ids: List[str]) -> None:
+    """Batches that finished before automatic analysis existed (or whose analysis was never started) get it now."""
+    todo = []
+    with _LOCK:
+        for bid in batch_ids:
+            b = _BATCHES.get(bid)
+            if b and b.get("status") in ("completed", "failed") and "analysis" not in b and b.get("stage") != "exporting":
+                b["analysis"] = {"status": "pending", "case_id": b.get("case_id")}
+                todo.append(bid)
+    for bid in todo:
+        _start_batch_analysis(bid)
+
+
 @router.get("/batches")
 def list_batches():
+    with _LOCK:
+        ids = list(_BATCHES)
+    _start_missing_analyses(ids)
     with _LOCK:
         items = sorted(_BATCHES.values(), key=lambda b: b["created_ts"], reverse=True)
         return _ok({"batches": [_batch_view(b) for b in items]})
@@ -836,6 +872,7 @@ def list_batches():
 
 @router.get("/batches/{batch_id}")
 def get_batch(batch_id: str):
+    _start_missing_analyses([batch_id])
     with _LOCK:
         b = _BATCHES.get(batch_id)
         if not b:
@@ -861,6 +898,7 @@ def retry_source(batch_id: str, body: RetryIn):
         b.pop("exports", None)
         b.pop("export_errors", None)
         b.pop("_exports_started", None)
+        b["analysis"] = {"status": "pending", "case_id": b.get("case_id")}
         _refresh_batch(batch_id)
     _SOURCE_POOL.submit(_run_source, batch_id, body.source_id)
     return _ok({"job_id": b["job_id"]})
@@ -1117,16 +1155,96 @@ def _source_summary(source_id: str) -> dict:
         by_method[b["extraction_method"]] = by_method.get(b["extraction_method"], 0) + 1
     agreements = [b["confidence_breakdown"]["ocr_agreement"] for b in blocks
                   if isinstance(b.get("confidence_breakdown"), dict) and "ocr_agreement" in b["confidence_breakdown"]]
+    warnings = st.get("warnings") or []
+    parse_score = _parse_score(blocks, pages, agreements, warnings)
+    # Native text that could not be cross-checked against OCR is unverified: it needs review.
+    unverified = 0
+    if parse_score["cap"]["applied"]:
+        unverified = sum(1 for b in blocks if not b.get("needs_review") and b.get("extraction_method") == "native_text"
+                         and "ocr_agreement" not in (b.get("confidence_breakdown") or {}))
     return {
         "source_id": source_id, "filename": meta.get("sanitized_filename", ""), "status": st.get("status", "not_processed"),
         "route": st.get("route"), "pages": len(pages), "blocks": len(blocks), "blocks_by_type": by_type,
         "blocks_by_method": by_method, "tables": by_type.get("table", 0), "figures": by_type.get("figure", 0),
         "document_confidence": round(sum(b["confidence"] for b in blocks) / len(blocks), 4) if blocks else None,
         "ocr_agreement_mean": round(sum(agreements) / len(agreements), 4) if agreements else None,
-        "needs_review": sum(1 for b in blocks if b.get("needs_review")),
+        "needs_review": sum(1 for b in blocks if b.get("needs_review")) + unverified,
+        "unverified_blocks": unverified,
         "reading_order_confidence": round(sum(p.get("reading_order_confidence", 0) for p in pages) / len(pages), 4) if pages else None,
-        "warnings": st.get("warnings") or [], "error": st.get("error"),
+        "parse_score": parse_score,
+        "warnings": warnings, "warning_counts": _warning_counts(warnings), "error": st.get("error"),
     }
+
+
+def _union_parse(parsing: List[dict]) -> dict:
+    """The final parse: the union of every document's parse, with totals and a block-weighted score."""
+    blocks = sum(p["blocks"] for p in parsing)
+    by_type: Dict[str, int] = defaultdict(int)
+    by_method: Dict[str, int] = defaultdict(int)
+    warns: Dict[str, dict] = {}
+    for p in parsing:
+        for k, v in (p.get("blocks_by_type") or {}).items():
+            by_type[k] += v
+        for k, v in (p.get("blocks_by_method") or {}).items():
+            by_method[k] += v
+        for w in p.get("warning_counts") or []:
+            e = warns.setdefault(w["code"], {"code": w["code"], "message": w["message"], "count": 0, "documents": []})
+            e["count"] += w["count"]
+            e["documents"].append(p["filename"])
+    scored = [(p["parse_score"]["value"], p["blocks"]) for p in parsing
+              if (p.get("parse_score") or {}).get("value") is not None and p["blocks"]]
+    value = round(sum(v * n for v, n in scored) / sum(n for _, n in scored), 4) if scored else None
+    capped = [p["filename"] for p in parsing if (p.get("parse_score") or {}).get("cap", {}).get("applied")]
+    return {
+        "documents": [{"source_id": p["source_id"], "filename": p["filename"], "pages": p["pages"], "blocks": p["blocks"],
+                       "parse_score": (p.get("parse_score") or {}).get("value"),
+                       "unread_pages": p.get("unread_pages", 0)} for p in parsing],
+        "pages": sum(p["pages"] for p in parsing), "blocks": blocks,
+        "tables": sum(p["tables"] for p in parsing), "figures": sum(p["figures"] for p in parsing),
+        "unread_pages": sum(p.get("unread_pages", 0) for p in parsing),
+        "blocks_by_type": dict(by_type), "blocks_by_method": dict(by_method),
+        "needs_review": sum(p["needs_review"] for p in parsing),
+        "parse_score": {"value": value, "formula": "block-weighted mean of the documents' parse scores",
+                        "capped_documents": capped},
+        "warnings": sorted(warns.values(), key=lambda w: (-w["count"], w["code"])),
+    }
+
+
+def _warning_counts(warnings: List[dict]) -> List[dict]:
+    counts: Dict[str, dict] = {}
+    for w in warnings:
+        c = counts.setdefault(w.get("code", "WARNING"), {"code": w.get("code", "WARNING"), "message": w.get("message", ""), "count": 0})
+        c["count"] += 1
+    return sorted(counts.values(), key=lambda c: (-c["count"], c["code"]))
+
+
+def _parse_score(blocks: List[dict], pages: List[dict], agreements: List[float], warnings: List[dict]) -> dict:
+    """Document parse score = mean block confidence, capped when a check could not run or the text layer is unusable.
+    Caps come from platform_config.json "parse_score.caps" ({warning code: maximum score})."""
+    if not blocks:
+        return {"value": None, "components": {}, "cap": {"applied": False}, "formula": "mean block confidence"}
+    mean = sum(b["confidence"] for b in blocks) / len(blocks)
+    components = {"mean_block_confidence": round(mean, 4)}
+    if agreements:
+        components["mean_ocr_agreement"] = round(sum(agreements) / len(agreements), 4)
+    if pages:
+        components["mean_reading_order_confidence"] = round(sum(p.get("reading_order_confidence", 0) for p in pages) / len(pages), 4)
+    try:
+        from backend import platform_api
+        caps = (platform_api._file_settings().get("parse_score") or {}).get("caps") or {}
+    except Exception:
+        caps = {}
+    codes = {w.get("code") for w in warnings}
+    hits = sorted(((float(caps[c]), c) for c in codes if c in caps))
+    cap = {"applied": False}
+    value = mean
+    if hits:
+        mx, code = hits[0]
+        cap = {"applied": mean > mx, "max": mx, "reason": f"{code} reported for this document", "code": code,
+               "config_key": f"parse_score.caps.{code}"}
+        value = min(mean, mx)
+    return {"value": round(value, 4), "components": components, "cap": cap,
+            "formula": "mean block confidence" + (f", capped at {cap['max']} ({cap['code']})" if cap.get("applied") else "")}
 
 
 def _with_filenames(evs: List[dict]) -> List[dict]:
@@ -1144,8 +1262,21 @@ def _with_filenames(evs: List[dict]) -> List[dict]:
     return out
 
 
+class _AnalysisError(Exception):
+    def __init__(self, status: int, code: str, message: str, details: Optional[dict] = None):
+        super().__init__(message)
+        self.status, self.code, self.message, self.details = status, code, message, details or {}
+
+
 @router.post("/cases/{case_id}/analyze")
 def analyze_case(case_id: str):
+    try:
+        return _ok(_analyze(case_id))
+    except _AnalysisError as e:
+        return _err(e.status, e.code, e.message, e.details)
+
+
+def _analyze(case_id: str) -> dict:
     """Runs the case stages on the case's processed sources and returns every stage's output plus a final result:
          parsing (per source)  ->  agent 15 fact normalizer  ->  agent 16 cross-document reasoning  ->  final
     Final confidence:
@@ -1155,19 +1286,24 @@ def analyze_case(case_id: str):
     with _LOCK:
         case = _CASES.get(case_id)
     if not case:
-        return _err(404, "NOT_FOUND", "Case not found")
-    if len(case.get("source_ids") or []) < 2:
-        return _err(400, "INVALID_INPUT", "A case needs at least two processed sources for cross-document reasoning")
-    pending = [s for s in case["source_ids"] if _SOURCES.get(s, {}).get("status") != "completed"]
+        raise _AnalysisError(404, "NOT_FOUND", "Case not found")
+    pending = [s for s in case.get("source_ids") or [] if _SOURCES.get(s, {}).get("status") in ("queued", "running", None)]
     if pending:
-        return _err(409, "CONFLICT", "Some sources of this case are not processed yet", {"source_ids": pending})
+        raise _AnalysisError(409, "CONFLICT", "Some sources of this case are not processed yet", {"source_ids": pending})
+    excluded = [s for s in case.get("source_ids") or [] if _SOURCES.get(s, {}).get("status") != "completed"]
+    case = {**case, "source_ids": [s for s in case.get("source_ids") or [] if s not in excluded]}
+    if not case["source_ids"]:
+        raise _AnalysisError(400, "INVALID_INPUT", "No document of this case was parsed successfully")
     _sync_case(case_id)
     started = time.time()
     stages: List[dict] = []
 
     parsing = [_source_summary(s) for s in case["source_ids"]]
     stages.append({"stage": "parsing", "agents": ["01", "02", "03", "04", "08"], "status": "completed",
-                   "output": parsing})
+                   "output": parsing, "excluded_sources": [{"source_id": s, "filename": (_meta(s) or {}).get("sanitized_filename", ""),
+                                                            "reason": (_SOURCES.get(s, {}).get("error") or {}).get("message", "parsing failed")}
+                                                           for s in excluded]})
+    stages.append({"stage": "union_parse", "agents": ["pipeline"], "status": "completed", "output": _union_parse(parsing)})
 
     try:
         a15 = _agent("15_fact_normalizer")
@@ -1175,12 +1311,16 @@ def analyze_case(case_id: str):
     except Exception as exc:
         info = _error_info(exc)
         stages.append({"stage": "fact_normalization", "agents": ["15"], "status": "failed", "error": info})
-        return _ok({"case_id": case_id, "stages": stages, "final": {"verdict": "failed", "confidence": 0.0, "error": info}})
+        result = {"case_id": case_id, "analyzed_at": _now(), "stages": stages, "final": {"verdict": "failed", "confidence": 0.0, "error": info}}
+        _save("pf_case_analysis", case_id, result)
+        return result
     facts = facts_out.get("facts") or []
     for f in facts:
         f["evidence"] = _with_filenames(f.get("evidence") or [])
     stages.append({"stage": "fact_normalization", "agents": ["15"], "status": "completed",
-                   "output": {"facts": facts, "warnings": facts_out.get("warnings") or []}})
+                   "output": {"facts": facts, "warnings": facts_out.get("warnings") or [],
+                              "documents": facts_out.get("documents") or [],
+                              "skipped_candidates": facts_out.get("skipped_candidates") or []}})
 
     try:
         a16 = _agent("16_cross_doc_reasoning")
@@ -1188,7 +1328,9 @@ def analyze_case(case_id: str):
     except Exception as exc:
         info = _error_info(exc)
         stages.append({"stage": "cross_document_reasoning", "agents": ["16"], "status": "failed", "error": info})
-        return _ok({"case_id": case_id, "stages": stages, "final": {"verdict": "failed", "confidence": 0.0, "error": info}})
+        result = {"case_id": case_id, "analyzed_at": _now(), "stages": stages, "final": {"verdict": "failed", "confidence": 0.0, "error": info}}
+        _save("pf_case_analysis", case_id, result)
+        return result
     fact_conf = {f["fact_id"]: float(f.get("confidence") or 0.0) for f in facts}
     for c in r.get("comparisons") or []:
         confs = [fact_conf[i] for i in c.get("fact_ids", []) if i in fact_conf]
@@ -1197,39 +1339,459 @@ def analyze_case(case_id: str):
         fd["evidence_references"] = _with_filenames(fd.get("evidence_references") or [])
     stages.append({"stage": "cross_document_reasoning", "agents": ["16"], "status": "completed", "output": r})
 
+    report = _reasoning_report(case, parsing, facts_out, facts, r)
+    cs = report["case_score"]
     findings = r.get("findings") or []
-    comps = [c for c in (r.get("comparisons") or []) if c.get("confidence") is not None]
-    if findings:
-        verdict = "discrepancies_found"
-        conf = sum(f["confidence"] for f in findings) / len(findings)
-        basis = "mean confidence of the findings"
-    elif comps:
-        verdict = "consistent"
-        conf = sum(c["confidence"] for c in comps) / len(comps)
-        basis = "mean confidence of the comparisons (all within tolerance)"
-    else:
-        verdict = "insufficient_data"
-        conf = 0.0
-        basis = "no comparable facts across the documents"
     sev: Dict[str, int] = {}
     for f in findings:
         sev[f["severity"]] = sev.get(f["severity"], 0) + 1
+    verdict = ("discrepancies_found" if findings else "consistent") if cs["status"] == "scored" else "not_scored"
+    counts = report["counts"]
     final = {
-        "verdict": verdict, "confidence": round(conf, 4), "confidence_basis": basis,
-        "documents": len(case["source_ids"]), "facts": len(facts), "comparisons": len(r.get("comparisons") or []),
-        "not_comparable": len(r.get("not_comparable") or []), "findings": len(findings), "findings_by_severity": sev,
+        "verdict": verdict, "confidence": cs["value"], "confidence_basis": cs.get("formula_description"),
+        "score_status": cs["status"], "not_scored_reason": cs.get("reason_text") or cs.get("reason"),
+        "documents": counts["documents"], "facts": counts["facts_accepted"], "facts_skipped": counts["facts_skipped"],
+        "pairs_considered": counts["pairs_considered"], "comparisons": counts["comparable"],
+        "not_comparable": counts["not_comparable"], "findings": counts["findings"], "findings_by_severity": sev,
         "human_review_required": bool(findings) or any(p["needs_review"] for p in parsing),
-        "summary": (f"{len(findings)} discrepanc{'y' if len(findings) == 1 else 'ies'} found across {len(case['source_ids'])} documents"
-                    if findings else ("All compared values agree within tolerance" if comps
-                                      else "No values could be compared across the documents")),
+        "summary": (f"{len(findings)} potential discrepanc{'y' if len(findings) == 1 else 'ies'} found across "
+                    f"{counts['documents']} documents; manual review recommended"
+                    if findings else ("Comparisons made; no discrepancy flagged" if cs["status"] == "scored"
+                                      else "Not scored")),
         "duration_ms": int((time.time() - started) * 1000),
     }
-    result = {"case_id": case_id, "analyzed_at": _now(), "stages": stages, "final": final}
+    result = {"case_id": case_id, "analyzed_at": _now(), "stages": stages, "final": final, "report": report}
     _save("pf_case_analysis", case_id, result)
-    return _ok(result)
+    return result
+
+
+def _nc_reason_code(nc: dict) -> str:
+    failed = [c.get("name") for c in nc.get("checks") or [] if c.get("status") == "fail"]
+    return (failed[0] if failed else "unspecified").upper()
+
+
+def _reasoning_report(case: dict, parsing: List[dict], facts_out: dict, facts: List[dict], r: dict) -> dict:
+    """Everything sections 2-4 need to explain themselves. All values are computed here, none in the UI."""
+    sids = list(case["source_ids"])
+    by_src: Dict[str, List[dict]] = defaultdict(list)
+    for f in facts:
+        by_src[(f.get("evidence") or [{}])[0].get("source_id", "")].append(f)
+    fdocs = {d["source_id"]: d for d in facts_out.get("documents") or []}
+    skipped = facts_out.get("skipped_candidates") or []
+    warn_counts: Dict[str, int] = defaultdict(int)
+    for w in r.get("warnings") or []:
+        warn_counts[w.get("code", "")] += 1
+
+    documents = []
+    for p in parsing:
+        fd = fdocs.get(p["source_id"], {})
+        zero = fd.get("zero_fact_reason")
+        if zero and p.get("parse_score", {}).get("cap", {}).get("code") == "UNUSABLE_TEXT_LAYER":
+            zero += "; the text layer is unusable (UNUSABLE_TEXT_LAYER)"
+        documents.append({
+            "source_id": p["source_id"], "filename": p["filename"],
+            "parse": {k: p.get(k) for k in ("pages", "blocks", "tables", "figures", "route", "blocks_by_method",
+                                            "needs_review", "unverified_blocks", "warning_counts", "error")},
+            "parse_score": p.get("parse_score"),
+            "facts": {"candidates": fd.get("candidates"), "accepted": len(by_src.get(p["source_id"], [])),
+                      "skipped_total": fd.get("skipped_total"), "skipped": fd.get("skipped") or [],
+                      "unclassified_numbers": fd.get("unclassified_numbers"), "zero_fact_reason": zero},
+        })
+
+    # relatedness: which signals two documents share
+    def sig(fs: List[dict]) -> dict:
+        return {"subjects": {f["subject"] for f in fs if f.get("subject")},
+                "metrics": {f["metric"] for f in fs},
+                "periods": {(f.get("period_start"), f.get("period_end")) for f in fs if f.get("period_start")},
+                "currencies": {f["currency"] for f in fs if f.get("currency")}}
+    sigs = {s: sig(by_src.get(s, [])) for s in sids}
+    names = {p["source_id"]: p["filename"] for p in parsing}
+    relatedness = []
+    for i, a in enumerate(sids):
+        for b in sids[i + 1:]:
+            A, B = sigs[a], sigs[b]
+            if not by_src.get(a) or not by_src.get(b):
+                relatedness.append({"source_a": a, "source_b": b, "filename_a": names.get(a), "filename_b": names.get(b),
+                                    "score": None, "reason": "a document has no facts", "signals": []})
+                continue
+            signals = []
+            for name, key in (("same subject", "subjects"), ("shared attribute", "metrics"),
+                              ("same period", "periods"), ("same currency", "currencies")):
+                shared = A[key] & B[key]
+                detail = (", ".join(sorted(" to ".join(x for x in v if x) if isinstance(v, tuple) else str(v) for v in shared))[:160]
+                          if shared else "none shared")
+                signals.append({"name": name, "matched": bool(shared), "detail": detail})
+            relatedness.append({"source_a": a, "source_b": b, "filename_a": names.get(a), "filename_b": names.get(b),
+                                "score": round(sum(s["matched"] for s in signals) / len(signals), 4), "signals": signals})
+
+    comps = r.get("comparisons") or []
+    ncs = [n for n in (r.get("not_comparable") or []) if _nc_reason_code(n) != "CONTENT_SAFETY"]
+    quarantined = len(r.get("not_comparable") or []) - len(ncs)
+    groups: Dict[str, dict] = {}
+    for n in ncs:
+        code = _nc_reason_code(n)
+        g = groups.setdefault(code, {"reason_code": code, "count": 0, "example": n.get("reason"), "example_fact_ids": []})
+        g["count"] += 1
+        if len(g["example_fact_ids"]) < 3:
+            g["example_fact_ids"].append(n.get("fact_ids"))
+    findings = r.get("findings") or []
+
+    # why there are no (more) comparisons, from the data
+    unlock: List[str] = []
+    zero_docs = [d["filename"] for d in documents if not d["facts"]["accepted"]]
+    if zero_docs:
+        unlock.append(f"{len(zero_docs)} document(s) produced no facts ({', '.join(zero_docs)}); see each document's reason")
+    unnamed = sum(1 for f in facts if not f.get("subject"))
+    if unnamed:
+        unlock.append(f"{unnamed} fact(s) have no named subject; add a name line (e.g. 'Employee name:', 'Account holder:') "
+                      "so values can be matched to the same person or party")
+    all_metrics = [sigs[s]["metrics"] for s in sids if by_src.get(s)]
+    if len(all_metrics) >= 2 and not any(all_metrics[i] & all_metrics[j] for i in range(len(all_metrics))
+                                         for j in range(i + 1, len(all_metrics))):
+        unlock.append("no shared attribute across documents: the documents report different things")
+    for code, g in groups.items():
+        unlock.append(f"{g['count']} pair(s) rejected by the '{code.lower()}' check")
+    dropped = {k: v for k, v in warn_counts.items() if k in ("EVIDENCE_UNVERIFIED", "VALUE_NOT_IN_EVIDENCE",
+                                                             "CROSS_CASE_SOURCE", "NO_EVIDENCE", "FACT_SCHEMA_INVALID")}
+
+    try:
+        from backend import platform_api
+        pen = ((platform_api._file_settings().get("agents") or {}).get("reasoning") or {}).get("confidence_penalties") or {}
+    except Exception:
+        pen = {}
+    if findings:
+        vals = [f["confidence"] for f in findings]
+        case_score = {"status": "scored", "value": round(sum(vals) / len(vals), 4),
+                      "components": {f"finding {i + 1} ({f['title'][:60]})": f["confidence"] for i, f in enumerate(findings)},
+                      "formula_description": "mean of finding scores; each finding = lower of its two facts' scores minus "
+                                             "penalties (agents.reasoning.confidence_penalties: "
+                                             + ", ".join(f"{k} {v}" for k, v in pen.items()) + ")"}
+    elif comps:
+        vals = [c["confidence"] for c in comps if c.get("confidence") is not None]
+        case_score = {"status": "scored", "value": round(sum(vals) / len(vals), 4) if vals else None,
+                      "components": {f"{c['metric']} ({c['subject']})": c.get("confidence") for c in comps},
+                      "formula_description": "mean of comparison scores; each comparison = lower of its two facts' scores"}
+    else:
+        case_score = {"status": "not_scored", "value": None, "components": {},
+                      "reason": "no comparable fact pairs across the documents" + (f" ({unlock[0]})" if unlock else ""),
+                      "formula_description": "a case score needs at least one comparable pair"}
+
+    counts = {"documents": len(sids), "facts_accepted": len(facts), "facts_skipped": len(skipped),
+              "facts_skipped_by_documents": sum(int(d["facts"]["skipped_total"] or 0) for d in documents),
+              "unclassified_numbers": sum(int(d["facts"]["unclassified_numbers"] or 0) for d in documents),
+              "facts_dropped_by_reasoning": sum(dropped.values()),
+              "pairs_considered": len(comps) + len(ncs), "comparable": len(comps), "not_comparable": len(ncs),
+              "quarantined": quarantined, "findings": len(findings)}
+    checks = [
+        {"check": "facts per document add up to total facts",
+         "ok": sum(d["facts"]["accepted"] for d in documents) == counts["facts_accepted"],
+         "detail": f"{sum(d['facts']['accepted'] for d in documents)} vs {counts['facts_accepted']}"},
+        {"check": "every skipped candidate is listed",
+         "ok": counts["facts_skipped"] == counts["facts_skipped_by_documents"],
+         "detail": f"{counts['facts_skipped']} listed vs {counts['facts_skipped_by_documents']} counted"},
+        {"check": "comparable + not comparable = pairs considered",
+         "ok": counts["comparable"] + counts["not_comparable"] == counts["pairs_considered"],
+         "detail": f"{counts['comparable']} + {counts['not_comparable']} = {counts['pairs_considered']}"},
+        {"check": "findings come from comparisons", "ok": counts["findings"] <= counts["comparable"],
+         "detail": f"{counts['findings']} findings, {counts['comparable']} comparisons"},
+    ]
+    if counts["pairs_considered"] == 0:
+        no_pairs = "no pair of facts shared the same attribute across documents" + (
+            f": {'; '.join(unlock)}" if unlock else "")
+    else:
+        no_pairs = None
+    report = {"documents": documents, "skipped_candidates": skipped, "relatedness": relatedness,
+              "not_comparable_summary": sorted(groups.values(), key=lambda g: -g["count"]),
+              "dropped_by_reasoning": [{"code": k, "count": v} for k, v in sorted(dropped.items())],
+              "no_pairs_reason": no_pairs, "unlock": unlock, "case_score": case_score, "counts": counts,
+              "reconciliation": checks}
+    _explain(report, sids, names, facts, r, ncs, comps, findings, pen)
+    return report
+
+
+# ----------------------------------------------------------------------------------------------- explanation trail
+_STOP = set("""about above after again against also among because been before being below between both could does
+doing down during each from further have having here into itself just more most other over same should some such than
+that their them then there these they this those through under until very were what when where which while will with
+would your page pages total date name number amount value""".split())
+
+
+def _norm_key(x: Optional[str]) -> str:
+    import unicodedata
+    return " ".join(unicodedata.normalize("NFKC", x or "").casefold().split())
+
+
+def _doc_text(source_id: str) -> str:
+    st = _SOURCES.get(source_id, {})
+    out = []
+    for _, p in sorted((st.get("pages") or {}).items()):
+        for b in p.get("blocks", []):
+            if b.get("raw_text"):
+                out.append(b["raw_text"])
+            for c in b.get("cells") or []:
+                if c.get("raw_text"):
+                    out.append(str(c["raw_text"]))
+    return "\n".join(out)
+
+
+def _content_words(text: str) -> set:
+    return {w for w in re.findall(r"[a-z]{4,}", text.casefold()) if w not in _STOP}
+
+
+def _doc_type_guess(text: str) -> Optional[dict]:
+    """Keyword rules from platform_config.json "doc_types" ({label: [phrases]}). Best label by share of its phrases
+    found in the document text; null when nothing matches."""
+    try:
+        from backend import platform_api
+        rules = platform_api._file_settings().get("doc_types") or {}
+    except Exception:
+        rules = {}
+    t = text.casefold()
+    best = None
+    for label, phrases in rules.items():
+        hit = [ph for ph in phrases if ph.casefold() in t]
+        if hit:
+            score = len(hit) / len(phrases)
+            if best is None or score > best["confidence"]:
+                best = {"label": label, "confidence": round(score, 4), "matched": hit,
+                        "method": "share of the type's keyword phrases found in the text (config doc_types)"}
+    return best
+
+
+def _explain(report: dict, sids: List[str], names: Dict[str, str], facts: List[dict], r: dict,
+             ncs: List[dict], comps: List[dict], findings: List[dict], pen: dict) -> None:
+    """Adds the reasoning trail: pairing funnel, attribute overlap, topic similarity, doc type, unlock hints,
+    and an itemised case score. Computed from the same facts agent 16 used."""
+    try:
+        from backend import platform_api
+        rcfg = ((platform_api._file_settings().get("agents") or {}).get("reasoning") or {})
+    except Exception:
+        rcfg = {}
+    max_pairs = int(rcfg.get("max_pairs_per_group", 200))
+    src_of = {f["fact_id"]: (f.get("evidence") or [{}])[0].get("source_id", "") for f in facts}
+    dropped_ids = {w.get("ref_id") for w in r.get("warnings") or []
+                   if w.get("code") in ("EVIDENCE_UNVERIFIED", "VALUE_NOT_IN_EVIDENCE", "CROSS_CASE_SOURCE",
+                                         "NO_EVIDENCE", "FACT_SCHEMA_INVALID", "PROMPT_INJECTION_SUSPECTED")}
+    verified = [f for f in facts if f["fact_id"] not in dropped_ids]
+    named = [f for f in verified if (f.get("subject") or "").strip()]
+    unnamed = [f for f in verified if not (f.get("subject") or "").strip()]
+
+    groups: Dict[Tuple[str, str], List[dict]] = defaultdict(list)
+    for f in named:
+        groups[(_norm_key(f["subject"]), _norm_key(f["metric"]))].append(f)
+    spanning = {k: g for k, g in groups.items() if len({src_of[f["fact_id"]] for f in g}) >= 2}
+    cand = 0
+    for g in spanning.values():
+        n = sum(1 for i, a in enumerate(g) for b in g[i + 1:] if src_of[a["fact_id"]] != src_of[b["fact_id"]])
+        cand += min(n, max_pairs)
+    gate_fail: Dict[str, int] = defaultdict(int)
+    named_nc = [n for n in ncs if _nc_reason_code(n) != "SUBJECT_NAMED"]
+    for n in named_nc:
+        gate_fail[_nc_reason_code(n)] += 1
+    within = sum(1 for c in comps if c.get("within_tolerance"))
+
+    def ex(fs: List[dict]) -> List[str]:
+        return [f["fact_id"] for f in fs[:3]]
+
+    one_doc = [k for k in groups if k not in spanning]
+    funnel = [
+        {"stage": "facts accepted (agent 15)", "unit": "facts", "count": len(facts), "note": "facts that passed the fact gate"},
+        {"stage": "facts verified against stored evidence (agent 16)", "unit": "facts", "count": len(verified),
+         "dropped": len(facts) - len(verified), "reason_code": "EVIDENCE_NOT_VERIFIED" if len(facts) != len(verified) else None,
+         "example_ids": sorted(i for i in dropped_ids if i)[:3]},
+        {"stage": "facts with a usable attribute", "unit": "facts", "count": sum(1 for f in verified if (f.get("metric") or "").strip()),
+         "dropped": sum(1 for f in verified if not (f.get("metric") or "").strip()), "reason_code": None},
+        {"stage": "facts with a named entity/subject", "unit": "facts", "count": len(named), "dropped": len(unnamed),
+         "reason_code": "SUBJECT_MISSING" if unnamed else None, "example_ids": ex(unnamed),
+         "note": "values are only compared for the same person or party"},
+        {"stage": "attribute groups (entity + attribute)", "unit": "groups", "count": len(groups)},
+        {"stage": "groups found in 2+ documents", "unit": "groups", "count": len(spanning), "dropped": len(one_doc),
+         "reason_code": "ATTRIBUTE_IN_ONE_DOCUMENT" if one_doc else None,
+         "example_ids": [f"{k[1]} ({k[0]})" for k in sorted(one_doc)[:3]]},
+        {"stage": "candidate pairs", "unit": "pairs", "count": cand, "note": f"pairs of facts from different documents (cap {max_pairs} per group)"},
+        {"stage": "pairs passing every gate (subject, currency, unit, frequency, period, basis, category)", "unit": "pairs",
+         "count": len(comps), "dropped": len(named_nc),
+         "reason_code": ", ".join(f"{k} x{v}" for k, v in sorted(gate_fail.items())) or None,
+         "example_ids": [n.get("fact_ids") for n in named_nc[:3]]},
+        {"stage": "findings (difference beyond tolerance)", "unit": "pairs", "count": len(findings), "dropped": within,
+         "reason_code": "WITHIN_TOLERANCE" if within else None,
+         "note": f"tolerance {rcfg.get('tolerance_abs', '?')} absolute and {rcfg.get('tolerance_pct', '?')}% (agents.reasoning)"},
+    ]
+    if unnamed:
+        funnel.append({"stage": "unnamed facts paired by attribute only (always rejected)", "unit": "pairs",
+                       "count": len(ncs) - len(named_nc), "reason_code": "SUBJECT_NAMED",
+                       "note": "shown under Not comparable so they are not lost"})
+
+    overlap: Dict[str, dict] = {}
+    for f in facts:  # every accepted fact; ones agent 16 could not verify are marked
+        k = _norm_key(f["metric"])
+        o = overlap.setdefault(k, {"attribute_normalized": k, "entities": set(), "documents": defaultdict(list)})
+        o["entities"].add(f.get("subject") or "(not named)")
+        o["documents"][src_of[f["fact_id"]]].append(f["fact_id"])
+    attribute_overlap = sorted(({"attribute_normalized": k, "entities": sorted(o["entities"]),
+                                 "documents": [{"source_id": s, "filename": names.get(s, s), "fact_ids": ids}
+                                               for s, ids in sorted(o["documents"].items())],
+                                 "shared_across_documents": len(o["documents"]) >= 2,
+                                 "unverified_fact_ids": sorted(i for d in o["documents"].values() for i in d if i in dropped_ids)}
+                                for k, o in overlap.items()), key=lambda a: (not a["shared_across_documents"], a["attribute_normalized"]))
+
+    # topic similarity + relation summary
+    words = {s: _content_words(_doc_text(s)) for s in sids}
+    for d in report["documents"]:
+        d["doc_type_guess"] = _doc_type_guess(_doc_text(d["source_id"]))
+    by_src: Dict[str, List[dict]] = defaultdict(list)
+    for f in verified:
+        by_src[src_of[f["fact_id"]]].append(f)
+    for rel in report["relatedness"]:
+        a, b = rel["source_a"], rel["source_b"]
+        A, B = words.get(a, set()), words.get(b, set())
+        sim = round(len(A & B) / len(A | B), 4) if A and B else None
+        rel["topic_similarity"] = {"value": sim, "method": "Jaccard overlap of content words (4+ letters, common words removed)",
+                                   "shared_terms": sorted(A & B)[:12]}
+        ents = sorted({f["subject"] for f in by_src[a] if f.get("subject")} & {f["subject"] for f in by_src[b] if f.get("subject")})
+        atts = sorted({_norm_key(f["metric"]) for f in by_src[a]} & {_norm_key(f["metric"]) for f in by_src[b]})
+        pers = sorted({f"{f['period_start']} to {f.get('period_end') or ''}" for f in by_src[a] if f.get("period_start")}
+                      & {f"{f['period_start']} to {f.get('period_end') or ''}" for f in by_src[b] if f.get("period_start")})
+        rel.update(shared_entities=ents, shared_attributes_count=len(atts), shared_attributes=atts, shared_periods=pers)
+        topic = ("not scored" if sim is None else
+                 f"{'high' if sim >= 0.3 else 'some' if sim >= 0.1 else 'little'} topic overlap ({sim:.2f}"
+                 + (f"; shared terms: {', '.join(rel['topic_similarity']['shared_terms'][:5])}" if A & B else "") + ")")
+        rel["relation_summary"] = (
+            f"{names.get(a, a)} and {names.get(b, b)}: {topic}; "
+            f"{len(ents)} shared entit{'y' if len(ents) == 1 else 'ies'}{(' (' + ', '.join(ents[:3]) + ')') if ents else ''}, "
+            f"{len(atts)} shared attribute(s){(' (' + ', '.join(atts[:3]) + ')') if atts else ''}, "
+            f"{len(pers)} shared period(s). "
+            + ("Comparable by value." if ents and atts else
+               "Related by topic but not comparable by value." if sim is not None and sim >= 0.1 else
+               "Not comparable by value."))
+
+    hints = []
+    if any(d["facts"]["accepted"] == 0 for d in report["documents"]):
+        hints.append({"reason_code": "DOCUMENT_WITHOUT_FACTS",
+                      "text": "; ".join(f"{d['filename']}: {d['facts'].get('zero_fact_reason') or 'no facts'}"
+                                        for d in report["documents"] if d["facts"]["accepted"] == 0)})
+    if unnamed:
+        hints.append({"reason_code": "SUBJECT_MISSING",
+                      "text": f"{len(unnamed)} fact(s) have no named entity; a name line such as 'Employee name:' or "
+                              "'Account holder:' lets values be matched to the same person or party"})
+    if groups and not spanning:
+        hints.append({"reason_code": "ATTRIBUTE_IN_ONE_DOCUMENT",
+                      "text": "no entity + attribute appears in two documents; the documents report different things"})
+    if not any(a["shared_across_documents"] for a in attribute_overlap) and len(sids) > 1 and verified:
+        hints.append({"reason_code": "NO_SHARED_ATTRIBUTE", "text": "no attribute appears in two documents"})
+    for code, n in sorted(gate_fail.items()):
+        hints.append({"reason_code": code, "text": f"{n} candidate pair(s) failed the '{code.lower()}' gate"})
+    report["unlock_hints"] = hints
+    report["unlock"] = [h["text"] for h in hints]
+    report["funnel"] = funnel
+    report["attribute_overlap"] = attribute_overlap
+
+    cs = report["case_score"]
+    if cs["status"] == "scored":
+        items = (findings if findings else comps)
+        cs["components"] = [{"name": (f"finding: {x['title'][:70]}" if findings else f"comparison: {x['metric']} ({x['subject']})"),
+                             "value": x.get("confidence"),
+                             "weight": round(1 / len(items), 4), "weight_config_key": None,
+                             "detail": ("lower of the two facts' scores minus penalties "
+                                        + ", ".join(f"{k} {v}" for k, v in pen.items()) if findings
+                                        else "lower of the two facts' scores"),
+                             "detail_config_key": "agents.reasoning.confidence_penalties" if findings else None}
+                            for x in items]
+        cs["reason_code"] = "FINDINGS" if findings else "COMPARISONS_WITHIN_TOLERANCE"
+        cs["reason_text"] = (f"{len(findings)} finding(s) for review" if findings else
+                             f"{len(comps)} comparison(s), none beyond tolerance")
+    else:
+        code = hints[0]["reason_code"] if hints else "NO_CANDIDATE_PAIRS"
+        cs["components"] = []
+        cs["reason_code"] = code
+        cs["reason_text"] = ("no comparable pairs: " + hints[0]["text"]) if hints else "no comparable pairs"
+        cs["reason"] = cs["reason_text"]
+    report["counts"].update(attribute_groups=len(groups), groups_shared=len(spanning), candidate_pairs=cand)
+    report["reconciliation"].append({"check": "candidate pairs from shared groups = pairs agent 16 evaluated (named)",
+                                     "ok": cand == len(comps) + len(named_nc),
+                                     "detail": f"{cand} vs {len(comps)} + {len(named_nc)}"})
+
+
+@router.get("/cases/{case_id}/reasoning-report")
+def get_reasoning_report(case_id: str):
+    res = _store().get("pf_case_analysis", case_id)
+    if not res or not res.get("report"):
+        return _err(404, "NOT_FOUND", "This case has not been analysed yet")
+    return _ok({"case_id": case_id, "analyzed_at": res.get("analyzed_at"), **res["report"]})
 
 
 @router.get("/cases/{case_id}/analysis")
 def get_case_analysis(case_id: str):
     res = _store().get("pf_case_analysis", case_id)
     return _ok(res) if res else _err(404, "NOT_FOUND", "This case has not been analysed yet")
+
+# ----------------------------------------------------------------------------------------------- batch -> case analysis
+def _start_batch_analysis(batch_id: str) -> None:
+    """After every document of a batch is parsed, run fact normalization (15) and cross-document reasoning (16)
+    over the batch's documents. A batch started without a case gets its own case, so its documents are compared
+    with each other. State is kept in batch["analysis"]: pending -> running -> completed | failed | skipped."""
+    created_case = None
+    with _LOCK:
+        b = _BATCHES.get(batch_id)
+        if not b or (b.get("analysis") or {}).get("status") != "pending":
+            return  # already started by another finishing source
+        states = {s: _SOURCES.get(s, {}).get("status") for s in b["source_ids"]}
+        if any(v not in ("completed", "failed") for v in states.values()):
+            b["analysis"] = {"status": "pending", "case_id": b.get("case_id")}
+            _save_batch(batch_id)
+            return
+        done = [s for s, v in states.items() if v == "completed"]
+        failed = [s for s, v in states.items() if v == "failed"]
+        case = _CASES.get(b.get("case_id") or "")
+        if not done and not case:
+            b["analysis"] = {"status": "skipped", "case_id": b.get("case_id"),
+                             "reason": f"All {len(failed)} document(s) failed parsing; retry them to build the final parse."}
+        else:
+            if not case:
+                cid = f"case_{uuid.uuid4().hex[:12]}"
+                now = _now()
+                _CASES[cid] = {"case_id": cid, "title": f"Batch {batch_id}", "status": "open", "created_at": now,
+                               "updated_at": now, "source_ids": list(done), "metadata": {"batch_id": batch_id}}
+                b["case_id"] = cid
+                created_case = cid
+            b["analysis"] = {"status": "running", "case_id": b["case_id"], "started_at": _now()}
+            _ANALYSIS_POOL.submit(_run_batch_analysis, batch_id, b["case_id"])
+    if created_case:
+        _save_case(created_case)
+        _sync_case(created_case)
+    _save_batch(batch_id)
+
+
+def _run_batch_analysis(batch_id: str, case_id: str) -> None:
+    try:
+        result = _analyze(case_id)
+        final = result.get("final") or {}
+        state = {"status": "failed" if final.get("verdict") == "failed" else "completed", "case_id": case_id,
+                 "analyzed_at": result.get("analyzed_at"), "final": final}
+        if final.get("error"):
+            state["error"] = final["error"]
+    except _AnalysisError as e:
+        state = {"status": "failed", "case_id": case_id, "error": {"code": e.code, "message": e.message}}
+    except Exception as exc:  # never leave the batch "running"
+        state = {"status": "failed", "case_id": case_id, "error": _error_info(exc)}
+    with _LOCK:
+        b = _BATCHES.get(batch_id)
+        if not b:
+            return
+        b["analysis"] = state
+    _save_batch(batch_id)
+
+
+@router.post("/batches/{batch_id}/analyze")
+def analyze_batch(batch_id: str):
+    """(Re)run cross-document reasoning for a finished batch."""
+    with _LOCK:
+        b = _BATCHES.get(batch_id)
+        if not b:
+            return _err(404, "NOT_FOUND", "Batch not found")
+        if (b.get("analysis") or {}).get("status") == "running":
+            return _err(409, "CONFLICT", "Cross-document reasoning is already running for this batch")
+        b["analysis"] = {"status": "pending", "case_id": b.get("case_id")}
+    _start_batch_analysis(batch_id)
+    with _LOCK:
+        return _ok(_batch_view(_BATCHES[batch_id]))

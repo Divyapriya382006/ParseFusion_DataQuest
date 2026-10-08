@@ -1,5 +1,5 @@
 // API envelope and cross-cutting types
-import type { ID, ISODate, ApiError } from "./canonical";
+import type { ID, ISODate, ApiError, WarningItem } from "./canonical";
 
 export interface ApiResponseSuccess<T> {
   ok: true;
@@ -94,6 +94,7 @@ export interface UserProfile {
 
 export interface BatchSummary {
   batch_id: ID;
+  job_id?: ID;
   created_at: ISODate;
   status: string;
   source_ids: ID[];
@@ -117,6 +118,45 @@ export interface BatchSummary {
     completed: number;
     failed: number;
   };
+  /** Per-document state, with what parsing produced once pages exist. */
+  sources?: BatchSourceState[];
+  /** Cross-document reasoning over the batch's documents, run automatically once parsing finishes. */
+  analysis?: BatchAnalysisState;
+}
+
+export interface BatchAnalysisState {
+  status: "pending" | "running" | "completed" | "failed" | "skipped" | "not_run" | string;
+  case_id?: ID | null;
+  analyzed_at?: ISODate;
+  reason?: string;
+  error?: { code: string; message: string };
+  final?: { verdict: string; confidence: number | null; summary?: string };
+}
+
+export interface BatchSourceParse {
+  pages: number;
+  blocks: number;
+  blocks_by_type: Record<string, number>;
+  blocks_by_method: Record<string, number>;
+  tables: number;
+  figures: number;
+  document_confidence: number | null;
+  ocr_agreement_mean: number | null;
+  needs_review: number;
+  reading_order_confidence: number | null;
+  route?: string | null;
+  /** Document parse score, capped when a check could not run (cap.reason says why). */
+  parse_score?: { value: number | null; cap: { applied: boolean; reason?: string; max?: number }; formula?: string };
+  warnings: WarningItem[];
+}
+
+export interface BatchSourceState {
+  source_id: ID;
+  filename?: string;
+  status: string;
+  stage?: string;
+  error?: { code: string; message: string } | null;
+  parse?: BatchSourceParse;
 }
 
 export interface MetricItem {
