@@ -45,6 +45,7 @@ DEFAULTS: Dict[str, Any] = {
     "chart_min_marks": 3,               # bars / line segments between the axes
     "chart_label_margin_fraction": 0.12,
     "caption_max_gap_fraction": 0.06,   # of page height
+    "caption_require_label": True,      # an unlabelled neighbour (a heading, a paragraph) is never taken as a caption
     "caption_pattern": r"^\s*(fig(ure)?|chart|graph|diagram|image|plate|plot)\.?\s*\d+",
 }
 
@@ -331,7 +332,10 @@ def find_caption(box: Sequence[float], text_blocks: List[dict], page_height: flo
         dist = max(0.0, below) if below >= -lh else (max(0.0, above) if above >= -lh else None)
         if dist is None or dist > gap:
             continue
-        key = (0 if pat.search(b.get("raw_text", "")) else 1, 0 if below >= -lh else 1, abs(dist))
+        labelled = bool(pat.search(b.get("raw_text", "")))
+        if not labelled and cfg.get("caption_require_label", True):
+            continue
+        key = (0 if labelled else 1, 0 if below >= -lh else 1, abs(dist))
         if best is None or key < best[0]:
             best = (key, b)
     return best[1] if best else None

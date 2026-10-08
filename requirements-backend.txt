@@ -16,3 +16,4 @@ reportlab>=4
 httpx>=0.28
 uvicorn[standard]>=0.30
 rapidfuzz>=3
+rapidocr-onnxruntime>=1.2.3

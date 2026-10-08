@@ -19,6 +19,7 @@ import { ActionsPage } from "./pages/ActionsPage";
 import { AccessControlPage } from "./pages/AccessControlPage";
 import { ExportsPage } from "./pages/ExportsPage";
 import { AuditLogPage } from "./pages/AuditLogPage";
+import { ChatPage } from "./pages/ChatPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -65,6 +66,7 @@ export default function App() {
                         <Route path="/access" element={<AccessControlPage />} />
                         <Route path="/exports" element={<ExportsPage />} />
                         <Route path="/audit" element={<AuditLogPage />} />
+                        <Route path="/chat" element={<ChatPage />} />
                         <Route path="*" element={<Navigate to="/" replace />} />
                       </Routes>
                     </main>

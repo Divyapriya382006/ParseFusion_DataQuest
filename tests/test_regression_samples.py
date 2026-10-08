@@ -172,7 +172,9 @@ def test_chart_is_not_a_table(no_ocr):
     blocks = _blocks(no_ocr["lecture.pdf"]["doc"])
     charts = [b for b in blocks if b["type"] == "chart"]
     tables = [b for b in blocks if b["type"] == "table"]
-    assert len(charts) == 1 and charts[0]["warnings"][0]["code"] == "CHART_EXTRACTION_UNAVAILABLE"
+    # a chart is either digitised (series + description) or flagged as not digitised; never silently dropped
+    assert len(charts) == 1 and (charts[0].get("interpreted") and charts[0].get("chart_data")
+                                 or charts[0]["warnings"][0]["code"] == "CHART_EXTRACTION_UNAVAILABLE")
     assert len(tables) == 1 and tables[0]["n_rows"] == 3
 
 

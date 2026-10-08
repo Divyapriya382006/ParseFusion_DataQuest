@@ -3,7 +3,8 @@
 README
   Inputs : {source_id, page_number, region?, engine?}   region = [x1,y1,x2,y2] or {"bbox":[...]} in page-image pixels
   Outputs: {engine, lines:[{text, location, confidence}], handwriting_detected?, warnings[]}
-  Engines: "tesseract" (pytesseract) and "paddleocr" behind one interface; default = first configured+available
+  Engines: "tesseract" (pytesseract), "rapidocr" (pip-only, ONNX, no system install) and "paddleocr" behind one
+           interface; default = first configured+available
            (settings ocr.engines).  An explicitly requested engine that is missing -> ENGINE_FAILED.
   Algorithm:
     1 authorise, load cached page image (agent 02 pre-rendered it) and page_meta (rotation, script)
@@ -50,6 +51,7 @@ class OcrInput(BaseModel):
     page_number: int = Field(ge=1)
     region: Optional[Union[List[float], RegionIn]] = None
     engine: Optional[str] = None
+    mode: Optional[str] = None   # "sparse" = scattered labels (charts, diagrams): word-level boxes instead of paragraph lines
 
     @field_validator("region", mode="before")
     @classmethod
@@ -87,6 +89,8 @@ class RawLine:
 _TESS_LANGS: Optional[set] = None
 _PADDLE: Dict[str, Any] = {}
 _PADDLE_LOCK = threading.Lock()
+_RAPID: Dict[str, Any] = {}
+_RAPID_LOCK = threading.Lock()
 
 
 def _locate_tesseract() -> None:
@@ -120,10 +124,18 @@ def _paddle_available() -> bool:
         return False
 
 
+def _rapid_available() -> bool:
+    try:
+        import rapidocr_onnxruntime  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 def available_engines() -> Dict[str, bool]:
     if os.getenv("PARSEFUSION_OCR_DISABLED", "").strip().lower() in ("1", "true", "yes"):
-        return {"tesseract": False, "paddleocr": False}  # explicit switch (tests, or to force text-layer-only runs)
-    return {"tesseract": _tess_available(), "paddleocr": _paddle_available()}
+        return {"tesseract": False, "paddleocr": False, "rapidocr": False}  # explicit switch (tests, or text-layer-only runs)
+    return {"tesseract": _tess_available(), "paddleocr": _paddle_available(), "rapidocr": _rapid_available()}
 
 
 def engine_info() -> Dict[str, Any]:
@@ -142,15 +154,22 @@ def engine_info() -> Dict[str, Any]:
             info["languages"] = sorted(pytesseract.get_languages(config=""))
         except Exception:
             pass
-    elif chosen == "paddle":
+    elif chosen == "paddleocr":
         try:
             import paddleocr
             info["version"] = getattr(paddleocr, "__version__", None)
         except Exception:
             pass
+    elif chosen == "rapidocr":
+        try:
+            from importlib.metadata import version
+            info["version"] = version("rapidocr-onnxruntime")
+        except Exception:
+            pass
+        info["languages"] = ["en", "ch"]
     if not chosen:
-        info["reason"] = ("OCR is switched off (PARSEFUSION_OCR_DISABLED)" if os.getenv("PARSEFUSION_OCR_DISABLED") else None) or ("Tesseract was not found (install it, e.g. C:\\Program Files\\Tesseract-OCR, or set TESSERACT_CMD) "
-                          "and PaddleOCR is not installed")
+        info["reason"] = ("OCR is switched off (PARSEFUSION_OCR_DISABLED)" if os.getenv("PARSEFUSION_OCR_DISABLED") else None) or ("No OCR engine found. Easiest fix: pip install rapidocr-onnxruntime (no system install needed). "
+                          "Or install Tesseract (e.g. C:\\Program Files\\Tesseract-OCR) or set TESSERACT_CMD")
     return info
 
 
@@ -200,6 +219,32 @@ def _run_tesseract(img: Any, langs: str, psm: int, timeout: float) -> List[RawLi
         x2 = max(d["left"][i] + d["width"][i] for i in idxs)
         y2 = max(d["top"][i] + d["height"][i] for i in idxs)
         out.append(RawLine(text, (x1, y1, x2, y2), conf))
+    return out
+
+
+def _rapid_instance() -> Any:
+    with _RAPID_LOCK:
+        if "ocr" not in _RAPID:
+            from rapidocr_onnxruntime import RapidOCR
+            _RAPID["ocr"] = RapidOCR()
+        return _RAPID["ocr"]
+
+
+def _run_rapid(img: Any) -> List[RawLine]:
+    """RapidOCR (PP-OCR models on onnxruntime). Detects every text box separately, so axis ticks, legend entries and
+    labels in a chart come back as separate items rather than merged lines."""
+    arr = np.asarray(img.convert("RGB"))
+    try:
+        res, _ = _rapid_instance()(arr)
+    except Exception as exc:
+        raise AgentError(Code.ENGINE_FAILED, "OCR engine failed") from exc
+    out: List[RawLine] = []
+    for item in res or []:
+        poly, text, score = item[0], str(item[1]).strip(), item[2]
+        if not text:
+            continue
+        p = np.asarray(poly, dtype=float)
+        out.append(RawLine(text, (float(p[:, 0].min()), float(p[:, 1].min()), float(p[:, 0].max()), float(p[:, 1].max())), float(score)))
     return out
 
 
@@ -343,7 +388,7 @@ def _mean_conf(lines: List[RawLine]) -> Tuple[float, int]:
 
 
 def _pipeline(page_img: Any, region: Optional[List[float]], rot: int, engine: str, tess_langs: str, paddle_lang: str,
-              psm: int, timeout: float) -> Tuple[List[Tuple[RawLine, List[float]]], str]:
+              psm: int, timeout: float, sparse: bool = False) -> Tuple[List[Tuple[RawLine, List[float]]], str]:
     """CPU-heavy part (runs in a worker thread). -> [(raw line, bbox in full-page px)], note."""
     from PIL import Image, ImageFilter, ImageOps
     W, H = page_img.size
@@ -364,7 +409,7 @@ def _pipeline(page_img: Any, region: Optional[List[float]], rot: int, engine: st
     if region and gray.height < int(S("ocr.region_min_height_px")):
         up = min(float(S("ocr.region_max_upscale")), int(S("ocr.region_min_height_px")) / max(1, gray.height))
     skew = 0.0
-    if not region or gray.width > 200:
+    if (not region or gray.width > 200) and not sparse:   # charts and diagrams are axis-aligned: never "deskew" them
         s = estimate_skew(gray)
         if abs(s) >= float(S("ocr.deskew_min_deg")):
             skew = s
@@ -377,12 +422,22 @@ def _pipeline(page_img: Any, region: Optional[List[float]], rot: int, engine: st
     def recognize(im: Any) -> List[RawLine]:
         if engine == "tesseract":
             return _run_tesseract(im, tess_langs, psm, timeout)
+        if engine == "rapidocr":
+            return _run_rapid(im)
         return _run_paddle(im, paddle_lang)
 
+    if sparse and engine == "rapidocr":
+        # RapidOCR's detector works best on the original colour crop, upscaled when small (tick labels are tiny)
+        colour = img.convert("RGB")
+        if rot:
+            colour = colour.rotate(-rot, expand=True)
+        if up != 1.0:
+            colour = colour.resize((int(colour.width * up), int(colour.height * up)), Image.LANCZOS)
+        gray = colour
     lines1 = recognize(gray)
     c1, n1 = _mean_conf(lines1)
     chosen, note = lines1, "pass1"
-    if c1 < float(S("ocr.retry_conf_threshold")):
+    if c1 < float(S("ocr.retry_conf_threshold")) and not (sparse and engine == "rapidocr"):
         enh = adaptive_binarize(gray.filter(ImageFilter.MedianFilter(3)))
         lines2 = recognize(enh)
         c2, n2 = _mean_conf(lines2)
@@ -473,7 +528,8 @@ def run(inp: OcrInput) -> OcrOutput:
     rkey = "" if region is None else ":r" + hashlib.sha256(
         ",".join(f"{v:.2f}" for v in region).encode("ascii")
     ).hexdigest()[:16]
-    cache_id = f"{sid}:{pno}:{engine}{rkey}"
+    mkey = ":sparse" if (inp.mode or "").lower() == "sparse" else ""
+    cache_id = f"{sid}:{pno}:{engine}{rkey}{mkey}"
     cached = store_get("ocr", cache_id)
     if isinstance(cached, dict) and "lines" in cached:
         audit_event("ocr_run", "source", sid, details={"page": pno, "engine": engine, "cached": True}, user=user, fail_closed=True)
@@ -495,10 +551,13 @@ def run(inp: OcrInput) -> OcrOutput:
     tess_langs = _tess_langs(tess_req, warnings) if engine == "tesseract" else tess_req
     dbg(AGENT, "step2-config", f"engine={engine} script={script} langs={tess_langs if engine == 'tesseract' else paddle_lang} rot={rot} region={'yes' if region else 'no'}")
     psm = int(S("ocr.psm_region") if region else S("ocr.psm_page"))
+    if mkey:
+        psm = int(S("ocr.psm_sparse"))
     timeout = float(S("ocr.timeout_s"))
     page_img = Image.open(io.BytesIO(png))
     page_img.load()
-    fut = _pool().submit(_pipeline, page_img, region, rot, engine, tess_langs, paddle_lang, psm, timeout)
+    extra = (True,) if mkey else ()   # the sparse flag is only passed when set, so the common call keeps its signature
+    fut = _pool().submit(_pipeline, page_img, region, rot, engine, tess_langs, paddle_lang, psm, timeout, *extra)
     try:
         items, note = fut.result(timeout=timeout + 5)
     except FutTimeout as exc:

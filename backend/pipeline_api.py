@@ -35,6 +35,9 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
+from backend import chart_reader as cr
+from backend import scan_structure as ss
+from backend import layout_columns as lc
 from backend import page_analysis as pa
 from backend import page_quality as pq
 
@@ -354,6 +357,56 @@ def _run_ocr_region(source_id: str, n: int, region: List[float]) -> List[dict]:
     return lines
 
 
+def _sparse_labels(source_id: str, n: int, region: List[float]) -> List[dict]:
+    """Word-level OCR boxes for the labels of a chart/diagram region (agent 04, mode "sparse")."""
+    try:
+        a04 = _agent("04_ocr")
+        engine = "rapidocr" if a04.available_engines().get("rapidocr") else None
+        out = a04.run(a04.OcrInput(source_id=source_id, page_number=n, region=region, mode="sparse", engine=engine)).model_dump(mode="json")
+    except Exception:
+        return []
+    return [{"text": ln["text"], "bbox": list((ln.get("location") or {})["bbox"]), "confidence": float(ln.get("confidence") or 0.0)}
+            for ln in out.get("lines") or [] if (ln.get("location") or {}).get("bbox") and (ln.get("text") or "").strip()]
+
+
+def _read_chart(source_id: str, n: int, scale: float, box: List[float], label_blocks: List[dict], title: Optional[str]) -> Optional[dict]:
+    """Bar-chart data for the region `box` (page px) or None. Never raises: a chart that cannot be read stays a chart/figure."""
+    try:
+        support = _support()
+        meta = _meta(source_id) or {}
+        png, _, _ = support.get_page_image(source_id, n, meta)
+        labels = [{"text": b["raw_text"], "bbox": list(b["location"]["bbox"]), "confidence": float(b.get("confidence") or 0.0)}
+                  for b in label_blocks if b.get("raw_text") and b["location"].get("bbox")]
+        key, loader = support.pdf_loader(source_id, meta)
+        with support.open_pdf(key, loader) as doc:
+            page = doc.load_page(n - 1)
+            return cr.interpret_region(box, scale, page=page, image_png=png, labels=labels,
+                                       ocr_labels=lambda: _sparse_labels(source_id, n, box), title=title)
+    except Exception:
+        return None
+
+
+def _chart_fields(data: dict, title: Optional[str], review_below: float) -> dict:
+    """Block fields that carry the digitised chart (series, description, confidence)."""
+    title = data.get("title") or title     # the chart's own heading wins over a neighbouring caption
+    text = cr.describe(data, title)
+    flat = [{"name": s["name"], "points": [{"x": p["category"], "y": p["value"]} for p in s["points"] if p.get("value") is not None]}
+            for s in data["series"]]
+    reasons = []
+    if not data.get("values_available"):
+        reasons.append("chart values could not be calibrated")
+    elif data["confidence"] < review_below:
+        reasons.append("chart values are estimates (low scale confidence)")
+    return {
+        "interpreted": True, "chart_type": data["chart_type"], "title": title, "series": [s for s in flat if s["points"]] or None,
+        "chart_data": data, "insight_text": text, "raw_text": text,
+        "confidence": data["confidence"],
+        "confidence_breakdown": {"axis_calibration": 1.0 if data["value_axis"]["calibrated"] else 0.0,
+                                 "scale_fit_r2": data["value_axis"].get("fit_r2"), "bars_read": sum(len(s["points"]) for s in data["series"])},
+        "needs_review": bool(reasons), "review_reasons": reasons, "warnings": [],
+    }
+
+
 def _pdf_structures(source_id: str, n: int, scale: float, cfg: dict) -> Tuple[List[dict], List[List[float]], List[List[float]]]:
     support = _support()
     meta = _meta(source_id) or {}
@@ -361,7 +414,51 @@ def _pdf_structures(source_id: str, n: int, scale: float, cfg: dict) -> Tuple[Li
     with support.open_pdf(key, loader) as doc:
         page = doc.load_page(n - 1)
         charts = pq.detect_charts(page, scale, pq.settings())
+        for box in cr.detect_bar_charts(page, scale):          # bar charts whose axes are shorter than the axis detector expects
+            if not any(pq._overlap(box, c) for c in charts):
+                charts.append(box)
         return pa.find_tables(page, scale), pa.find_figures(page, scale, float(cfg["min_figure_area"])), charts
+
+
+def _scan_structures(source_id: str, n: int, ocr_lines: List[dict], W: int, H: int, rot: int):
+    """Tables and diagram regions of a scanned page, rebuilt from the image and the OCR boxes (scan_structure.py).
+    -> (tables in page pixels, figure boxes, shape hints)."""
+    cfg = ss.settings()
+    png, _, _ = _support().get_page_image(source_id, n, _meta(source_id) or {})
+    W = W or 0
+    graphics = ss.find_graphics(png, ocr_lines, cfg)
+    boxes = [g["bbox"] for g in graphics]
+    rot = rot if rot in (90, 180, 270) else 0
+    free = [ln for ln in ocr_lines if not any(ss._centre_in(ln["bbox"], b) for b in boxes if not _is_grey(graphics, b))]
+    # a wide OCR line holding several numbers is several cells: re-read it word by word
+    cells: List[dict] = []
+    calls = 0
+    for ln in free:
+        words = ln["text"].split()
+        nums = sum(1 for w in words if ss.is_number(w))
+        if len(words) >= int(cfg["table_split_words_min"]) and nums >= 2 and calls < int(cfg["table_max_split_calls"]):
+            calls += 1
+            sub = _sparse_labels(source_id, n, [ln["bbox"][0] - 2, ln["bbox"][1] - 2, ln["bbox"][2] + 2, ln["bbox"][3] + 2])
+            if len(sub) >= 2:
+                cells += ss.split_cells(sub, float(cfg["cell_gap"]))
+                continue
+        cells.append({"text": ln["text"], "bbox": list(ln["bbox"]), "confidence": ln["confidence"]})
+    Wu, Hu = ss.upright_size(W or max(c["bbox"][2] for c in cells), H or max(c["bbox"][3] for c in cells), rot)
+    up = [{**c, "bbox": ss.to_upright(c["bbox"], W, H, rot)} for c in cells] if rot else cells
+    tables = ss.build_tables(up, cfg)
+    for t in tables:
+        if rot:
+            t["bbox"] = ss.from_upright(t["bbox"], W, H, rot)
+            for row in t["rows"]:
+                for c in row:
+                    c["bbox"] = ss.from_upright(c["bbox"], W, H, rot)
+    # a black-and-white "graphic" that is really a ruled table is not a figure
+    keep = [g for g in graphics if not (g.get("grey") and any(ss._overlap(g["bbox"], t["bbox"]) for t in tables))]
+    return tables, [g["bbox"] for g in keep], [g.get("shape") for g in keep]
+
+
+def _is_grey(graphics: List[dict], box: List[float]) -> bool:
+    return any(g["bbox"] is box and g.get("grey") for g in graphics)
 
 
 def _process_unit(source_id: str, kind: str, unit: dict, page_meta: dict, threshold: float) -> dict:
@@ -443,6 +540,16 @@ def _process_unit(source_id: str, kind: str, unit: dict, page_meta: dict, thresh
             tables = kept
             # an image that is really a chart region is reported once, as the chart
             figures = [fb for fb in figures if not any(pq._inside(fb, ch) for ch in charts)]
+        scan_mode = False
+        fig_shapes: Dict[int, Optional[str]] = {}
+        if not native and ocr_lines and pclass in OCR_CLASSES and kind in ("pdf", "docx", "pptx", "image", "png", "jpg", "jpeg", "tiff", "tif"):
+            scale = float(pm.get("scale") or 0) or 1.0
+            try:
+                tables, figures, shapes = _scan_structures(source_id, n, ocr_lines, width, height, int(pm.get("rotation_correction_cw") or 0))
+                fig_shapes = dict(enumerate(shapes))
+                scan_mode = True
+            except Exception as exc:
+                warnings.append({"code": "STRUCTURE_DETECTION_FAILED", "message": _error_info(exc)["message"], "source_id": source_id})
         table_boxes = [t["bbox"] for t in tables]
 
         # Focused re-reads: full-page OCR often skips ruled table rows or small isolated text. Re-read those regions
@@ -516,7 +623,10 @@ def _process_unit(source_id: str, kind: str, unit: dict, page_meta: dict, thresh
                     native_q = [float(sp.get("confidence") or 0.0) for sp in native
                                 if (sp.get("location") or {}).get("bbox") and pa.center_inside(sp["location"]["bbox"], cell["bbox"])]
                     q = sum(native_q) / len(native_q) if native_q else 1.0
-                    conf, bd, alt = pa.score(cell["text"], q, cell["bbox"], ocr_lines, cfg)
+                    if cell.get("confidence") is not None and scan_mode:
+                        conf, bd, alt = round(float(cell["confidence"]), 4), {"ocr_engine_confidence": round(float(cell["confidence"]), 4)}, None
+                    else:
+                        conf, bd, alt = pa.score(cell["text"], q, cell["bbox"], ocr_lines, cfg)
                     c = {"row": r_i, "col": cell["col"], "row_span": 1, "col_span": cell["col_span"], "is_header": r_i == 0,
                          "raw_text": cell["text"], "location": loc_px(cell["bbox"]), "confidence": conf}
                     if alt:
@@ -530,7 +640,7 @@ def _process_unit(source_id: str, kind: str, unit: dict, page_meta: dict, thresh
                 "source_id": source_id, "page_id": page_id, "unit_id": page_id, "reading_order_index": 0,
                 "location": loc_px(t["bbox"]), "confidence": tconf,
                 "confidence_breakdown": {"mean_cell_confidence": tconf, "cells": len(cells)},
-                "extraction_method": "pdf_table_finder", "needs_review": tconf < threshold,
+                "extraction_method": "ocr_table_grid" if scan_mode else "pdf_table_finder", "needs_review": tconf < threshold,
                 "warnings": [], "n_rows": len(t["rows"]), "n_cols": t["n_cols"], "cells": cells,
             })
 
@@ -545,7 +655,21 @@ def _process_unit(source_id: str, kind: str, unit: dict, page_meta: dict, thresh
                     blocks.append(blk)
                     inside.append(blk)
             cap = pq.find_caption(fb, [b for b in blocks if b["type"] == "text"], float(height or 1), qcfg)
+            data = _read_chart(source_id, n, scale, list(fb), inside, cap["raw_text"][:300] if cap else None)
+            if data:   # the image is a bar chart whose bars and scale could be read: report it as a chart with its data
+                cid = f"{page_id}_chart_f{f_i}"
+                blocks = [b for b in blocks if not any(b is l for l in inside)]
+                blocks.append({
+                    "block_id": cid, "type": "chart", "chart_id": cid, "source_id": source_id, "page_id": page_id,
+                    "unit_id": page_id, "reading_order_index": 0, "location": loc_px(fb),
+                    "extraction_method": f"chart_reader:{data['method']}", "crop_url": crop(fb),
+                    "caption": cap["raw_text"][:300] if cap else None, "caption_block_id": cap["block_id"] if cap else None,
+                    **_chart_fields(data, cap["raw_text"][:300] if cap else None, review_below),
+                })
+                continue
             fid = f"{page_id}_figure_{f_i}"
+            if scan_mode:    # the labels read inside a diagram belong to it, not to the page's running text
+                blocks = [b for b in blocks if not any(b is l for l in inside)]
             blocks.append({
                 "block_id": fid, "type": "figure", "figure_id": fid, "source_id": source_id, "page_id": page_id,
                 "unit_id": page_id, "reading_order_index": 0, "location": loc_px(fb),
@@ -556,16 +680,22 @@ def _process_unit(source_id: str, kind: str, unit: dict, page_meta: dict, thresh
                 "warnings": [{"code": "FIGURE_NOT_INTERPRETED", "message": "The image content is not interpreted; only its placement, caption and any text inside are extracted"}],
                 "crop_url": crop(fb),
                 "caption": cap["raw_text"][:300] if cap else None, "caption_block_id": cap["block_id"] if cap else None,
-                "text_inside": " ".join(b["raw_text"] for b in inside)[:300] or None,
+                "text_inside": " ".join(b["raw_text"] for b in inside)[:(2000 if scan_mode else 300)] or None,
+                **({"raw_text": ("Diagram" + (f" ({cap['raw_text'][:200]})" if cap else "") + ". Text read inside: " + " | ".join(b["raw_text"] for b in inside))[:2500],
+                    "labels": [{"text": b["raw_text"], "bbox": b["location"]["bbox"], "confidence": b["confidence"]} for b in inside],
+                    "shape_hint": fig_shapes.get(f_i),
+                    "warnings": [{"code": "FIGURE_NOT_INTERPRETED", "message": "This diagram is not a readable bar chart; its image and every label read inside it are kept"}]}
+                   if scan_mode else {}),
             })
         for c_i, cb in enumerate(charts):
             cap = pq.find_caption(cb, [b for b in blocks if b["type"] == "text"], float(height or 1), qcfg)
             # axis labels and legends inside the chart belong to the chart, not to the page's running text
             labels = [b for b in blocks if b["type"] == "text" and b is not cap and b["location"].get("bbox")
-                      and pq._inside(b["location"]["bbox"], cb)]
+                      and pq._inside(b["location"]["bbox"], cb)
+                      and len(b["raw_text"].split()) <= int(cr.settings()["label_max_words"])]   # paragraphs stay body text
             blocks = [b for b in blocks if not any(b is l for l in labels)]
             cid = f"{page_id}_chart_{c_i}"
-            blocks.append({
+            cblock = {
                 "block_id": cid, "type": "chart", "chart_id": cid, "source_id": source_id, "page_id": page_id,
                 "unit_id": page_id, "reading_order_index": 0, "location": loc_px(cb),
                 "confidence": 1.0, "confidence_breakdown": {"vector_axes_detected": 1.0},
@@ -574,7 +704,12 @@ def _process_unit(source_id: str, kind: str, unit: dict, page_meta: dict, thresh
                 "title": cap["raw_text"][:300] if cap else None, "caption": cap["raw_text"][:300] if cap else None,
                 "labels": [{"text": l["raw_text"], "bbox": l["location"]["bbox"], "confidence": l["confidence"]} for l in labels],
                 "warnings": [{"code": "CHART_EXTRACTION_UNAVAILABLE", "message": "A chart was detected; its data series are not digitised"}],
-            })
+            }
+            data = _read_chart(source_id, n, scale, list(cb), labels, cblock["title"])
+            if data:
+                cblock.update(_chart_fields(data, cblock["title"], review_below))
+                cblock["extraction_method"] = f"chart_reader:{data['method']}"
+            blocks.append(cblock)
         blocks = pq.merge_equations(blocks, n, crop, qcfg, review_below)
 
     if not width and blocks:
@@ -587,7 +722,21 @@ def _process_unit(source_id: str, kind: str, unit: dict, page_meta: dict, thresh
     figs = [b for b in blocks if b["type"] in ("figure", "chart")]
     located = [(b["location"]["bbox"], b) for b in blocks if b["location"]["bbox"] and b["type"] not in ("figure", "chart")]
     unlocated = [b for b in blocks if not b["location"]["bbox"]]
-    ordered, uncertain = pa.xy_cut(located, float(width or 1), float(height or 1)) if located else ([], 0)
+    n_columns = 1
+    if located:
+        ro_rot = rotation if rotation in (90, 180, 270) and pclass in OCR_CLASSES else 0
+        if ro_rot:   # a page scanned sideways is read in its upright orientation
+            located = [(ss.to_upright(bx, float(width), float(height), ro_rot), b) for bx, b in located]
+            ow, oh = ss.upright_size(float(width or 1), float(height or 1), ro_rot)
+        else:
+            ow, oh = float(width or 1), float(height or 1)
+        col = lc.order(located, lambda g: pa.xy_cut(g, ow, oh), lc.settings())
+        if col:   # a column gutter was found: read column by column instead of row by row
+            ordered, uncertain, n_columns = col
+        else:
+            ordered, uncertain = pa.xy_cut(located, ow, oh)
+    else:
+        ordered, uncertain = [], 0
     for fb in figs:
         fbox = fb["location"]["bbox"]
         pos = next((i for i, b in enumerate(ordered) if pa.center_inside(b["location"]["bbox"], fbox)), None)
@@ -612,7 +761,7 @@ def _process_unit(source_id: str, kind: str, unit: dict, page_meta: dict, thresh
     return {
         "page_id": page_id, "source_id": source_id, "unit_id": page_id, "page_number": n,
         "width": width, "height": height, "rotation": rotation, "layout_class": pclass,
-        "reading_order_confidence": ro_conf,
+        "reading_order_confidence": ro_conf, "columns": n_columns,
         "status": status, "coverage_score": coverage,
         "uncovered_regions": [{"bbox": r, "coordinate_system": "pixel_top_left", "page_width": width, "page_height": height}
                               for r in uncovered],

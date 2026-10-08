@@ -106,7 +106,7 @@ _DEFAULTS: Dict[str, Any] = {
                "min_inline_attachment_bytes": 4096, "timeout_s": 300},
     "native_text": {"min_chars": 5, "max_garbage_ratio": 0.15, "garbage_penalty": 0.6, "tounicode_penalty": 0.15,
                     "tiny_font_pt": 1.5},
-    "ocr": {"engines": ["paddleocr", "tesseract"], "timeout_s": 90, "psm_page": 3, "psm_region": 6,
+    "ocr": {"engines": ["paddleocr", "tesseract", "rapidocr"], "timeout_s": 90, "psm_page": 3, "psm_region": 6, "psm_sparse": 11,
             "default_langs": "eng", "retry_conf_threshold": 0.80, "deskew_min_deg": 0.3, "deskew_max_deg": 5.0,
             "region_pad_px": 8, "region_min_height_px": 96, "region_max_upscale": 3.0, "handwriting_max_lines": 40,
             "handwriting_cv_threshold": 0.85, "handwriting_low_conf_fraction": 0.4,

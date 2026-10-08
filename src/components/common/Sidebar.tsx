@@ -9,6 +9,7 @@ import {
   ShieldCheck,
   Download,
   ScrollText,
+  MessageSquareText,
 } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
 import { CAPABILITY_KEYS } from "../../config/capabilityKeys";
@@ -64,6 +65,12 @@ const NAV_ITEMS: NavItemDef[] = [
     path: "/exports",
     icon: Download,
     capability: CAPABILITY_KEYS.EXPORT_VIEW,
+  },
+  {
+    label: "Document Chat",
+    path: "/chat",
+    icon: MessageSquareText,
+    alwaysShow: true,
   },
   {
     label: "Audit Log",
