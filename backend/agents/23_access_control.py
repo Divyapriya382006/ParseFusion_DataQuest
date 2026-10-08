@@ -5,10 +5,10 @@ import threading
 import time
 import uuid
 from datetime import timedelta
-from typing import Any, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 from fastapi import APIRouter, Body, Query, Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Column, Integer, MetaData, String, Table, Text, column, insert, inspect, literal, select, table, update
 
 try:
@@ -17,6 +17,10 @@ except ImportError:  # pragma: no cover
     import e_common as ec
 
 AGENT = "23-access"
+_DOCUMENT_REQUEST_KIND = "document_access_request"
+_DOCUMENT_GRANT_KIND = "document_access_grant"
+_DOCUMENT_VISIBILITY_KIND = "document_access_visibility"
+_DOCUMENT_REQUEST_LOCK = threading.RLock()
 
 acl_requests = Table(
     "acl_requests", ec.APP_META,
@@ -181,6 +185,214 @@ class DecisionIn(BaseModel):
     notes: Optional[str] = None
 
 
+class DocumentRequestIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_id: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=3, max_length=2000)
+
+
+class DocumentDecisionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str = Field(min_length=1, max_length=64)
+    decision: str
+    notes: Optional[str] = Field(default=None, max_length=2000)
+
+
+class DocumentVisibilityIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_id: str = Field(min_length=1, max_length=128)
+    visibility: Literal["public", "private"]
+
+
+def _document_store():
+    from backend.common import store
+    return store
+
+
+def _document_access(user: dict, source_id: str) -> bool:
+    if ec.is_admin(user):
+        return True
+    store = _document_store()
+    tenant_id = user.get("tenant_id", "default")
+    meta = store.get("source_meta", source_id)
+    if not isinstance(meta, dict) or meta.get("tenant_id") != tenant_id or meta.get("status") != "accepted":
+        return False
+    visibility = store.get(_DOCUMENT_VISIBILITY_KIND, f"{tenant_id}:{source_id}")
+    if isinstance(visibility, dict) and visibility.get("visibility") == "public":
+        return True
+    grant = store.get(_DOCUMENT_GRANT_KIND, f"{tenant_id}:{user['user_id']}:{source_id}")
+    return bool(grant)
+
+
+def _document_visibility(store: Any, tenant_id: str, source_id: str) -> str:
+    value = store.get(_DOCUMENT_VISIBILITY_KIND, f"{tenant_id}:{source_id}")
+    return "public" if isinstance(value, dict) and value.get("visibility") == "public" else "private"
+
+
+def _document_source(source_id: str, user: dict) -> Optional[dict]:
+    meta = _document_store().get("source_meta", source_id)
+    if not isinstance(meta, dict) or meta.get("tenant_id") != user.get("tenant_id", "default"):
+        return None
+    if meta.get("status") != "accepted":
+        return None
+    return meta
+
+
+def op_document_sources(user: dict) -> dict:
+    store = _document_store()
+    list_by_kind = getattr(store, "list_by_kind", None)
+    if not callable(list_by_kind):
+        raise ec.AgentError("ENGINE_FAILED", "The local document catalog is unavailable")
+    items = []
+    for source_id, meta in list_by_kind("source_meta"):
+        if not isinstance(meta, dict) or meta.get("tenant_id") != user.get("tenant_id", "default") or meta.get("status") != "accepted":
+            continue
+        items.append({
+            "source_id": str(source_id),
+            "filename": str(meta.get("sanitized_filename") or source_id),
+            "kind": str(meta.get("detected_mime") or ""),
+            "created_at": meta.get("created_at"),
+            "visibility": _document_visibility(store, user.get("tenant_id", "default"), str(source_id)),
+            "has_access": _document_access(user, str(source_id)),
+        })
+    items.sort(key=lambda item: (str(item.get("created_at") or ""), item["filename"].lower()), reverse=True)
+    return {"documents": items}
+
+
+def op_document_visibility(inp: DocumentVisibilityIn, user: dict) -> dict:
+    if not ec.is_admin(user):
+        raise ec.AgentError("FORBIDDEN", "Admin only")
+    if not _document_source(inp.source_id, user):
+        raise ec.AgentError("NOT_FOUND", "Document not found")
+    store = _document_store()
+    tenant_id = user.get("tenant_id", "default")
+    key = f"{tenant_id}:{inp.source_id}"
+    previous = store.get(_DOCUMENT_VISIBILITY_KIND, key)
+    value = {"tenant_id": tenant_id, "source_id": inp.source_id, "visibility": inp.visibility,
+             "updated_by": user["user_id"], "updated_at": ec.iso_now()}
+    with _DOCUMENT_REQUEST_LOCK:
+        store.put(_DOCUMENT_VISIBILITY_KIND, key, value)
+    try:
+        ec.audit("document_visibility_changed", "document", inp.source_id, "success",
+                 {"visibility": inp.visibility}, strict=True, user=user)
+    except Exception:
+        with _DOCUMENT_REQUEST_LOCK:
+            if previous is None:
+                store.delete(_DOCUMENT_VISIBILITY_KIND, key)
+            else:
+                store.put(_DOCUMENT_VISIBILITY_KIND, key, previous)
+        raise
+    ec.notify_send(
+        "document_visibility_changed",
+        message=f"Document {inp.source_id} visibility was set to {inp.visibility} by {user['user_id']}.",
+        link="/access",
+    )
+    return {"source_id": inp.source_id, "visibility": inp.visibility}
+
+
+def op_document_request(inp: DocumentRequestIn, user: dict) -> dict:
+    if ec.is_admin(user):
+        raise ec.AgentError("FORBIDDEN", "Administrators do not need to request document access")
+    if user.get("role") != "viewer":
+        raise ec.AgentError("FORBIDDEN", "Only viewer accounts can request document access")
+    reason = inp.reason.strip()
+    if len(reason) < 3:
+        raise ec.AgentError("INVALID_INPUT", "A reason is required")
+    meta = _document_source(inp.source_id, user)
+    if not meta:
+        raise ec.AgentError("NOT_FOUND", "Document not found")
+    if _document_access(user, inp.source_id):
+        raise ec.AgentError("CONFLICT", "You already have access to this document")
+    store = _document_store()
+    now = ec.iso_now()
+    request_id = str(uuid.uuid4())
+    request = {
+        "request_id": request_id, "tenant_id": user.get("tenant_id", "default"),
+        "user_id": user["user_id"], "source_id": inp.source_id,
+        "filename": str(meta.get("sanitized_filename") or inp.source_id),
+        "reason": reason, "status": "pending", "created_at": now,
+        "decided_by": None, "decided_at": None, "notes": None,
+    }
+    with _DOCUMENT_REQUEST_LOCK:
+        if _document_access(user, inp.source_id):
+            raise ec.AgentError("CONFLICT", "You already have access to this document")
+        existing = [pending for _, pending in store.list_by_kind(_DOCUMENT_REQUEST_KIND)
+                    if isinstance(pending, dict) and pending.get("tenant_id") == user.get("tenant_id", "default")
+                    and pending.get("user_id") == user["user_id"] and pending.get("source_id") == inp.source_id
+                    and pending.get("status") == "pending"]
+        if existing:
+            raise ec.AgentError("CONFLICT", "A request for this document is already pending",
+                                {"request_id": existing[0]["request_id"]})
+        store.put(_DOCUMENT_REQUEST_KIND, request_id, request)
+        try:
+            ec.audit("document_access_requested", "document_access_request", request_id, "success",
+                     {"source_id": inp.source_id}, strict=True, user=user)
+        except Exception:
+            store.delete(_DOCUMENT_REQUEST_KIND, request_id)
+            raise
+    ec.notify_send("document_access_requested",
+                   message=f"Viewer {user['user_id']} requested access to document {inp.source_id}. Request {request_id}.",
+                   link="/access")
+    return {key: value for key, value in request.items() if key != "tenant_id"}
+
+
+def op_document_requests(user: dict, status: Optional[str] = None) -> dict:
+    store = _document_store()
+    rows = []
+    for _, request in store.list_by_kind(_DOCUMENT_REQUEST_KIND):
+        if not isinstance(request, dict) or request.get("tenant_id") != user.get("tenant_id", "default"):
+            continue
+        if not ec.is_admin(user) and request.get("user_id") != user["user_id"]:
+            continue
+        if status and request.get("status") != status:
+            continue
+        rows.append({key: value for key, value in request.items() if key != "tenant_id"})
+    rows.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return {"requests": rows}
+
+
+def op_document_decision(inp: DocumentDecisionIn, user: dict) -> dict:
+    if not ec.is_admin(user):
+        raise ec.AgentError("FORBIDDEN", "Admin only")
+    if inp.decision not in ("approve", "reject"):
+        raise ec.AgentError("INVALID_INPUT", "decision must be approve or reject")
+    store = _document_store()
+    previous_request = None
+    with _DOCUMENT_REQUEST_LOCK:
+        request = store.get(_DOCUMENT_REQUEST_KIND, inp.request_id)
+        if not isinstance(request, dict) or request.get("tenant_id") != user.get("tenant_id", "default"):
+            raise ec.AgentError("NOT_FOUND", "Document access request not found")
+        if request.get("status") != "pending":
+            raise ec.AgentError("CONFLICT", "Document access request was already decided",
+                                {"status": request.get("status")})
+        previous_request = dict(request)
+        request = dict(request)
+        request.update(status="approved" if inp.decision == "approve" else "rejected",
+                       decided_by=user["user_id"], decided_at=ec.iso_now(), notes=(inp.notes or "").strip() or None)
+        store.put(_DOCUMENT_REQUEST_KIND, inp.request_id, request)
+        if inp.decision == "approve":
+            store.put(_DOCUMENT_GRANT_KIND,
+                      f"{request['tenant_id']}:{request['user_id']}:{request['source_id']}",
+                      {"tenant_id": request["tenant_id"], "user_id": request["user_id"],
+                       "source_id": request["source_id"], "request_id": inp.request_id,
+                       "granted_by": user["user_id"], "granted_at": request["decided_at"]})
+    try:
+        ec.audit("document_access_decided", "document_access_request", inp.request_id, "success",
+                 {"decision": inp.decision, "source_id": request["source_id"]}, strict=True, user=user)
+    except Exception:
+        with _DOCUMENT_REQUEST_LOCK:
+            store.put(_DOCUMENT_REQUEST_KIND, inp.request_id, previous_request)
+            if inp.decision == "approve":
+                store.delete(_DOCUMENT_GRANT_KIND,
+                             f"{request['tenant_id']}:{request['user_id']}:{request['source_id']}")
+        raise
+    event = "document_access_approved" if inp.decision == "approve" else "document_access_rejected"
+    ec.notify_send(event,
+                   message=f"Document access request {inp.request_id} for viewer {request['user_id']} was {request['status']} by {user['user_id']}.",
+                   link="/access")
+    return {key: value for key, value in request.items() if key != "tenant_id"}
+
+
 # ---------------------------------------------------------------------------
 # operations
 # ---------------------------------------------------------------------------
@@ -281,7 +493,7 @@ def op_request(inp: RequestIn, user: dict) -> dict:
         ec.audit("access_requested", "access_request", rid, "success", {"resource": inp.resource, "columns": cols, "duration_seconds": secs,
                                                                         "reason_len": len(reason)}, strict=True, user=user)
     ec.notify_send("access_requested", message=f"Request {rid} by {user['user_id']} (role {user['role']}) for resource {inp.resource}, {len(cols)} column(s).",
-                   link="/admin/access-requests")
+                   link="/access")
     ec.dbg(AGENT, "request_done", request_id=rid)
     return {"request_id": rid, "user_id": user["user_id"], "resource": inp.resource, "columns": cols, "reason": reason,
             "duration_seconds": secs, "status": "pending", "created_at": stamp}
@@ -296,6 +508,13 @@ def op_requests(user: dict, status: Optional[str] = None) -> dict:
     with ec.app_engine().connect() as c:
         rows = [_req_dict(r) for r in c.execute(q)]
     ec.audit("access_requests_viewed", "access", "requests", "success", {"returned": len(rows), "admin_view": ec.is_admin(user)}, user=user)
+    ec.notify_send(
+        "access_requests_viewed",
+        message=f"{user['user_id']} (role {user['role']}) viewed {len(rows)} access request(s)"
+                f"{' as an administrator' if ec.is_admin(user) else ''}.",
+        link="/access",
+        dedupe_key=f"access-requests-viewed:{user['user_id']}",
+    )
     ec.dbg(AGENT, "requests_listed", n=len(rows))
     return {"requests": rows}
 
@@ -306,6 +525,11 @@ def op_decision(inp: DecisionIn, user: dict) -> dict:
         raise ec.AgentError("INVALID_INPUT", "decision must be approve or reject")
     if not ec.is_admin(user):
         ec.audit("access_denied", "access_request", inp.request_id, "denied", {"reason": "not admin"}, user=user)
+        ec.notify_send(
+            "access_denied",
+            message=f"{user['user_id']} (role {user['role']}) was denied access to decide request {inp.request_id}.",
+            link="/access",
+        )
         raise ec.AgentError("FORBIDDEN", "Admin only")
     valid_until = None
     if inp.decision == "approve":
@@ -350,7 +574,7 @@ def op_decision(inp: DecisionIn, user: dict) -> dict:
                   "kid": signature["kid"] if signature else None}, strict=True, user=user)
         new = c.execute(select(acl_requests).where(acl_requests.c.request_id == r.request_id)).one()
     ec.notify_send("access_approved" if inp.decision == "approve" else "access_rejected",
-                   message=f"Request {r.request_id} for {r.user_id} {inp.decision}d by {user['user_id']}.", link="/admin/access-requests")
+                   message=f"Request {r.request_id} for {r.user_id} {inp.decision}d by {user['user_id']}.", link="/access")
     ec.dbg(AGENT, "decision_done", decision=inp.decision, grant=bool(grant))
     out: dict = {"request": _req_dict(new)}
     if grant:
@@ -371,7 +595,7 @@ def sweep_expired() -> int:
                      strict=True, user={"user_id": "system", "role": "system", "tenant_id": g.tenant_id})
             done.append(g)
     for g in done:  # after commit: never queue a notification while holding the app-DB write lock
-        ec.notify_send("grant_expired", message=f"Grant {g.grant_id} for {g.subject_id} on {g.resource} expired.", link="/admin/access-requests")
+        ec.notify_send("grant_expired", message=f"Grant {g.grant_id} for {g.subject_id} on {g.resource} expired.", link="/access")
     ec.dbg(AGENT, "sweep_done", expired=len(done))
     return len(done)
 
@@ -405,6 +629,34 @@ def get_requests(request: Request, status: Optional[str] = Query(None)):
 @router.post("/agents/access/decision")
 def post_decision(request: Request, body: dict = Body(default=None)):
     return ec.handle(request, lambda: op_decision(DecisionIn.model_validate(body or {}), ec.current_user()))
+
+
+@router.get("/agents/access/documents")
+def get_access_documents(request: Request):
+    return ec.handle(request, lambda: op_document_sources(ec.current_user()))
+
+
+@router.post("/agents/access/document-request")
+def post_document_request(request: Request, body: dict = Body(default=None)):
+    return ec.handle(request, lambda: op_document_request(
+        DocumentRequestIn.model_validate(body or {}), ec.current_user()), 201)
+
+
+@router.get("/agents/access/document-requests")
+def get_document_requests(request: Request, status: Optional[str] = Query(None)):
+    return ec.handle(request, lambda: op_document_requests(ec.current_user(), status))
+
+
+@router.post("/agents/access/document-decision")
+def post_document_decision(request: Request, body: dict = Body(default=None)):
+    return ec.handle(request, lambda: op_document_decision(
+        DocumentDecisionIn.model_validate(body or {}), ec.current_user()))
+
+
+@router.post("/agents/access/document-visibility")
+def post_document_visibility(request: Request, body: dict = Body(default=None)):
+    return ec.handle(request, lambda: op_document_visibility(
+        DocumentVisibilityIn.model_validate(body or {}), ec.current_user()))
 
 
 def _sweeper_loop() -> None:

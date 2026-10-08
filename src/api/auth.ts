@@ -7,6 +7,10 @@ export async function fetchCurrentUser(signal?: AbortSignal): Promise<UserProfil
   return apiClient<UserProfile>(AUTH_ME_ENDPOINT, { signal });
 }
 
+export async function switchDemoRole(role: "admin" | "viewer"): Promise<UserProfile> {
+  return apiClient<UserProfile>("/auth/demo-role", { method: "POST", body: { role } });
+}
+
 export function saveSessionToken(token: string | null): void {
   setInMemoryToken(token);
 }

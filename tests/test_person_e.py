@@ -318,7 +318,8 @@ def act(decision, user, aid="a1", **kw):
     return A18.run(A18.ApprovalIn(action_id=aid, decision=decision, **kw), user)
 
 
-def test_approval_happy_path_submit_approve_execute():
+def test_approval_happy_path_submit_approve_execute(monkeypatch):
+    monkeypatch.setenv("APP_BASE_URL", "https://app.example.org")
     mk_action()
     r1 = act("submit", ALICE)
     assert r1["action"]["status"] == "in_review" and r1["event"]["previous_status"] == "draft"
@@ -328,7 +329,12 @@ def test_approval_happy_path_submit_approve_execute():
     assert r3["action"]["status"] == "executed" and ("action_result", "idem-a1") in STORE
     types_ = [e["event_type"] for e in audit_events()]
     assert {"action_submit", "action_approve", "action_execute", "signature_created"} <= set(types_)
-    assert [o["event_type"] for o in outbox() if o["event_type"].startswith("action_")] == ["action_submitted", "action_approved", "action_executed"]
+    action_notifications = [o for o in outbox() if o["event_type"].startswith("action_")]
+    assert [o["event_type"] for o in action_notifications] == ["action_submitted", "action_approved", "action_executed"]
+    assert all(o["link"] == "/actions" for o in action_notifications)
+    assert ec.process_outbox_once()["sent"] == 3
+    assert all(call["url"] == "https://ntfy.sh/dataquest" for call in NTFY_CALLS)
+    assert all(call["headers"]["Click"] == "https://app.example.org/actions" for call in NTFY_CALLS)
 
 
 def test_approval_separation_of_duties():
@@ -500,7 +506,8 @@ def test_access_row_filter_applied_in_query():
     assert [r["id"] for r in out["rows"]] == [1, 2] and out["locked_columns"] == []
 
 
-def test_access_request_validation_duplicates_and_notification():
+def test_access_request_validation_duplicates_and_notification(monkeypatch):
+    monkeypatch.setenv("APP_BASE_URL", "https://app.example.org")
     r = A23.op_request(A23.RequestIn(resource="orders", columns=["salary"], reason="payroll check", duration="24h"), ALICE)
     assert r["status"] == "pending" and r["duration_seconds"] == 86400
     assert codes(A23.op_request, A23.RequestIn(resource="orders", columns=["salary"], reason="again", duration=1), ALICE) == "CONFLICT"
@@ -508,7 +515,12 @@ def test_access_request_validation_duplicates_and_notification():
     assert codes(A23.op_request, A23.RequestIn(resource="orders", columns=["zzz"], reason="abc", duration=1), ALICE) == "INVALID_INPUT"
     assert codes(A23.op_request, A23.RequestIn(resource="orders", columns=["id"], reason="abc", duration=1), ALICE) == "CONFLICT"  # already unlocked
     assert codes(A23.op_request, A23.RequestIn(resource="orders", columns=["salary"], reason="abc", duration="9y"), ALICE) == "INVALID_INPUT"
-    assert [o["event_type"] for o in outbox()].count("access_requested") == 1
+    access_notifications = [o for o in outbox() if o["event_type"] == "access_requested"]
+    assert len(access_notifications) == 1
+    assert access_notifications[0]["link"] == "/access"
+    assert ec.process_outbox_once()["sent"] == 1
+    assert NTFY_CALLS[0]["url"] == "https://ntfy.sh/dataquest"
+    assert NTFY_CALLS[0]["headers"]["Click"] == "https://app.example.org/access"
 
 
 def test_access_requests_never_collapsed():
@@ -520,6 +532,7 @@ def test_access_requests_never_collapsed():
 def test_access_decision_flow_grant_signature_expiry_and_sweep():
     r = A23.op_request(A23.RequestIn(resource="orders", columns=["salary"], reason="payroll check", duration=1), ALICE)
     assert codes(A23.op_decision, A23.DecisionIn(request_id=r["request_id"], decision="approve", valid_until="2999-01-01T00:00:00Z"), BOB) == "FORBIDDEN"
+    assert any(o["event_type"] == "access_denied" for o in outbox())
     assert codes(A23.op_decision, A23.DecisionIn(request_id=r["request_id"], decision="approve"), CAROL) == "INVALID_INPUT"
     assert codes(A23.op_decision, A23.DecisionIn(request_id=r["request_id"], decision="approve", valid_until="2001-01-01T00:00:00Z"), CAROL) == "INVALID_INPUT"
     vu = ec.iso(ec.now() + timedelta(hours=2))
@@ -549,6 +562,9 @@ def test_access_requests_visibility():
     A23.op_request(A23.RequestIn(resource="orders", columns=["salary"], reason="bbb", duration=1), BOB)
     assert len(A23.op_requests(ALICE)["requests"]) == 1
     assert len(A23.op_requests(CAROL)["requests"]) == 2
+    viewed = [o for o in outbox() if o["event_type"] == "access_requests_viewed"]
+    assert len(viewed) == 2
+    assert all(o["link"] == "/access" and "viewed" in o["message"] for o in viewed)
 
 
 # =================================================================== 20 EXPORT
@@ -658,6 +674,9 @@ def test_export_history_only_own_and_audit_trail():
     h = A20.history(ALICE)
     assert len(h["exports"]) == 1 and h["exports"][0]["download_url"].startswith("/agents/export/download/")
     assert "export_created" in [e["event_type"] for e in audit_events()]
+    history_alert = [o for o in outbox() if o["event_type"] == "export_history_viewed"]
+    assert len(history_alert) == 1
+    assert history_alert[0]["link"] == "/exports" and "alice" in history_alert[0]["message"]
 
 
 def test_export_audit_failure_means_no_export_row(monkeypatch):

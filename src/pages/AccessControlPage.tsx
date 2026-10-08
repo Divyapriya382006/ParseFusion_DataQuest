@@ -10,6 +10,7 @@ import {
 } from "../agents/23_accessControl";
 import { SchemaBrowser } from "../components/access/SchemaBrowser";
 import { AccessRequestsQueue } from "../components/access/AccessRequestsQueue";
+import { DocumentAccessPanel } from "../components/access/DocumentAccessPanel";
 import { RequestAccessModal } from "../components/access/RequestAccessModal";
 import { BackendNotConnected } from "../components/common/BackendNotConnected";
 import { LockedCell } from "../components/common/LockedCell";
@@ -17,18 +18,20 @@ import { Skeleton } from "../components/common/LoadingSkeleton";
 import { Modal } from "../components/common/Modal";
 import { useAuth } from "../context/AuthContext";
 import { CAPABILITY_KEYS } from "../config/capabilityKeys";
+import { BackendApiError } from "../api/errors";
 
 export const AccessControlPage: React.FC = () => {
   const { hasCapability } = useAuth();
   const canAdmin = hasCapability(CAPABILITY_KEYS.ACCESS_ADMIN);
 
-  const [activeTab, setActiveTab] = useState<"catalog" | "queue">("catalog");
+  const [activeTab, setActiveTab] = useState<"catalog" | "queue" | "documents">("documents");
 
   // Schema Catalog
   const {
     data: schemaData,
     isLoading: isSchemaLoading,
     isError: isSchemaError,
+    error: schemaError,
     refetch: refetchSchema,
   } = useQuery({
     queryKey: ["accessSchema"],
@@ -111,25 +114,12 @@ export const AccessControlPage: React.FC = () => {
     refetchSchema();
   };
 
-  if (isSchemaError) {
-    return (
-      <div className="p-8 max-w-6xl mx-auto space-y-4">
-        <h1 className="text-xl font-bold text-neutral-100">Governed Access Control</h1>
-        <BackendNotConnected
-          endpoint="/agents/access/schema"
-          onRetry={() => refetchSchema()}
-          message="Could not load the catalog schema and column masking policies from the backend."
-        />
-      </div>
-    );
-  }
-
   return (
     <div className="p-8 max-w-6xl mx-auto space-y-6 text-xs">
       <div>
         <h1 className="text-xl font-bold text-neutral-100 flex items-center gap-2">
           <ShieldCheck className="w-5 h-5 text-amber-400" />
-          <span>Governed Access & Column-Level Security</span>
+          <span>Document Access & Governance</span>
         </h1>
         <p className="text-xs text-neutral-400 mt-1">
           Catalog permissions, zero-knowledge locked columns, and auditable access elevation requests.
@@ -150,6 +140,18 @@ export const AccessControlPage: React.FC = () => {
           Catalog & Column Masking
         </button>
 
+        <button
+          type="button"
+          onClick={() => setActiveTab("documents")}
+          className={`px-4 py-2 rounded-lg font-medium text-xs transition-colors ${
+            activeTab === "documents"
+              ? "bg-neutral-800 text-neutral-100 shadow-sm"
+              : "text-neutral-400 hover:text-neutral-200"
+          }`}
+        >
+          Documents & Requests
+        </button>
+
         {canAdmin && (
           <button
             type="button"
@@ -165,15 +167,32 @@ export const AccessControlPage: React.FC = () => {
         )}
       </div>
 
-      {isSchemaLoading && <Skeleton className="h-96 w-full rounded-xl" />}
+      {activeTab === "catalog" && isSchemaError && (
+        <BackendNotConnected
+          endpoint="/agents/access/schema"
+          onRetry={() => refetchSchema()}
+          message="Could not load the catalog schema and column masking policies from the backend."
+          detail={
+            schemaError instanceof BackendApiError
+              ? schemaError.message
+              : schemaError instanceof Error
+                ? schemaError.message
+                : undefined
+          }
+        />
+      )}
 
-      {activeTab === "catalog" && schemaData?.tables && (
+      {activeTab === "catalog" && isSchemaLoading && <Skeleton className="h-96 w-full rounded-xl" />}
+
+      {activeTab === "catalog" && !isSchemaError && schemaData?.tables && (
         <SchemaBrowser
           tables={schemaData.tables}
           onPreviewTable={(id) => setPreviewResourceId(id)}
           onRequestAccess={(resId, name, cols) => handleOpenRequestModal(resId, name, cols)}
         />
       )}
+
+      {activeTab === "documents" && <DocumentAccessPanel />}
 
       {activeTab === "queue" && canAdmin && (
         <AccessRequestsQueue

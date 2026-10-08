@@ -1,5 +1,5 @@
 import React from "react";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useSearchParams } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "./context/ThemeContext";
 import { ConfigProvider } from "./context/ConfigContext";
@@ -15,15 +15,10 @@ import { UploadPage } from "./pages/UploadPage";
 import { BatchProgressPage } from "./pages/BatchProgressPage";
 import { ResultsDashboardPage } from "./pages/ResultsDashboardPage";
 import { CaseReviewPage } from "./pages/CaseReviewPage";
-import { CaseAnalysisPage } from "./pages/CaseAnalysisPage";
 import { ActionsPage } from "./pages/ActionsPage";
 import { AccessControlPage } from "./pages/AccessControlPage";
-import { ChatPage } from "./pages/ChatPage";
 import { ExportsPage } from "./pages/ExportsPage";
 import { AuditLogPage } from "./pages/AuditLogPage";
-import { MetricsPage } from "./pages/MetricsPage";
-import { AgentStatusPage } from "./pages/AgentStatusPage";
-import { SettingsPage } from "./pages/SettingsPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -33,6 +28,13 @@ const queryClient = new QueryClient({
     },
   },
 });
+
+const LegacyCaseAnalysisRedirect: React.FC = () => {
+  const [searchParams] = useSearchParams();
+  const nextParams = new URLSearchParams(searchParams);
+  nextParams.set("view", "case-analysis");
+  return <Navigate to={`/batch?${nextParams.toString()}`} replace />;
+};
 
 export default function App() {
   return (
@@ -58,15 +60,11 @@ export default function App() {
                         <Route path="/batch" element={<BatchProgressPage />} />
                         <Route path="/dashboard" element={<ResultsDashboardPage />} />
                         <Route path="/cases" element={<CaseReviewPage />} />
-                        <Route path="/case-analysis" element={<CaseAnalysisPage />} />
+                        <Route path="/case-analysis" element={<LegacyCaseAnalysisRedirect />} />
                         <Route path="/actions" element={<ActionsPage />} />
                         <Route path="/access" element={<AccessControlPage />} />
-                        <Route path="/chat" element={<ChatPage />} />
                         <Route path="/exports" element={<ExportsPage />} />
                         <Route path="/audit" element={<AuditLogPage />} />
-                        <Route path="/metrics" element={<MetricsPage />} />
-                        <Route path="/agent-status" element={<AgentStatusPage />} />
-                        <Route path="/settings" element={<SettingsPage />} />
                         <Route path="*" element={<Navigate to="/" replace />} />
                       </Routes>
                     </main>

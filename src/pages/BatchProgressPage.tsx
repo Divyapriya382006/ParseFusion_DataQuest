@@ -12,9 +12,10 @@ import {
   Loader2,
   Play,
 } from "lucide-react";
-import { analyzeBatch, getBatch, listBatches, retryBatchSource } from "../api/batches";
+import { analyzeBatch, archiveBatch, deleteBatch, getBatch, listBatchSummaries, retryBatchSource } from "../api/batches";
 import { getCaseAnalysis } from "../api/caseAnalysis";
 import { AnalysisResult, SectionTitle } from "../components/caseAnalysis/AnalysisResult";
+import { CaseAnalysisPage } from "./CaseAnalysisPage";
 import { getSourceDocument } from "../api/sources";
 import { getApiUrl } from "../api/client";
 import { useConfig } from "../context/ConfigContext";
@@ -24,8 +25,8 @@ import { Skeleton } from "../components/common/LoadingSkeleton";
 import { ConfidenceIndicator } from "../components/common/ConfidenceIndicator";
 import { formatBackendDate } from "../lib/formatters";
 import { NotConnectedError } from "../api/errors";
-import type { BatchSummary, BatchSourceState } from "../types/api";
-import type { Block, TableBlock, FigureBlock } from "../types/canonical";
+import type { BatchSummary, BatchSourceState, BatchSummaryRow } from "../types/api";
+import type { Block, TableBlock, FigureBlock, PageUnit } from "../types/canonical";
 
 const FINAL = new Set(["completed", "failed"]);
 const ANALYSIS_ACTIVE = new Set(["pending", "running"]);
@@ -38,79 +39,209 @@ const PREVIEW_TABLE_ROWS = 12;
 /* ------------------------------------------------------------------------------------------ page */
 
 export const BatchProgressPage: React.FC = () => {
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const batchId = searchParams.get("id") || "";
   const jobId = searchParams.get("job_id") || "";
-  return batchId ? <SingleBatchView batchId={batchId} jobId={jobId} /> : <AllBatchesView />;
+  if (batchId) return <SingleBatchView batchId={batchId} jobId={jobId} />;
+
+  const analysisView = searchParams.get("view") === "case-analysis";
+  return (
+    <div className="mx-auto max-w-[1600px] pt-5">
+      <div className="mb-5 ml-8 inline-flex rounded-lg border border-neutral-800 bg-neutral-900/70 p-1" role="tablist" aria-label="Pipeline workspace">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={!analysisView}
+          onClick={() => setSearchParams({})}
+          className={`rounded-md px-3 py-2 text-xs font-medium ${!analysisView ? "bg-neutral-700 text-neutral-100" : "text-neutral-400 hover:text-neutral-200"}`}
+        >
+          Batch Pipeline
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={analysisView}
+          onClick={() => setSearchParams({ view: "case-analysis" })}
+          className={`rounded-md px-3 py-2 text-xs font-medium ${analysisView ? "bg-neutral-700 text-neutral-100" : "text-neutral-400 hover:text-neutral-200"}`}
+        >
+          Case Analysis
+        </button>
+      </div>
+      {analysisView ? <CaseAnalysisPage /> : <AllBatchesView />}
+    </div>
+  );
 };
 
-/** No batch id: every batch on the backend, newest first, each with the parsing output of its documents. */
+/** No batch id: one summary row per batch (searchable, paged, collapsed). Detail loads only when a row is opened. */
 const AllBatchesView: React.FC = () => {
   const { config, isNotConnected: configNotConnected } = useConfig();
   const pollInterval = config?.poll_interval_ms || 2000;
+  const pageSize = config?.ui?.batch_page_size;
+  const [q, setQ] = useState("");
+  const [page, setPage] = useState(0);
+  const [showArchived, setShowArchived] = useState(false);
+  const [open, setOpen] = useState<Record<string, boolean>>({});
 
   const { data, isLoading, isError, error, refetch } = useQuery({
-    queryKey: ["batches"],
-    queryFn: ({ signal }) => listBatches(signal),
+    queryKey: ["batchSummaries", q, page, pageSize, showArchived],
+    queryFn: ({ signal }) =>
+      listBatchSummaries({ q, offset: page * (pageSize || 0), limit: pageSize, includeArchived: showArchived }, signal),
     enabled: !configNotConnected,
     retry: (count, err) => !(err instanceof NotConnectedError && err.status === 404) && count < 2,
     refetchInterval: (query) => {
       if (query.state.status === "error") return false;
-      const batches = query.state.data?.batches ?? [];
-      return batches.some(isActive) ? pollInterval : false;
+      const rows = query.state.data?.batches ?? [];
+      return rows.some((r) => !FINAL.has(r.status) || ANALYSIS_ACTIVE.has(r.analysis_status)) ? pollInterval : false;
     },
   });
-
-  const batches = data?.batches ?? [];
+  const rows = data?.batches ?? [];
+  const limit = data?.limit || 1;
+  const total = data?.total ?? 0;
 
   return (
-    <div className="p-8 max-w-[1600px] mx-auto space-y-6 text-xs">
+    <div className="p-8 max-w-[1600px] mx-auto space-y-4 text-xs">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 className="text-xl font-bold text-neutral-100">Batch Pipeline</h1>
-          <div className="text-neutral-500 mt-1">
-            All pipeline runs and what parsing produced for each document. Running batches update automatically.
-          </div>
+          <div className="text-neutral-500 mt-1">One row per run. Open a row to see each document's parse, the final parse and the cross-document reasoning.</div>
         </div>
-        <Link
-          to="/"
-          className="inline-flex items-center gap-1.5 px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg font-medium"
-        >
+        <Link to="/" className="inline-flex items-center gap-1.5 px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg font-medium">
           New run
         </Link>
       </div>
 
-      {isLoading && (
-        <div className="space-y-4">
-          <Skeleton className="h-24 w-full rounded-xl" />
-          <Skeleton className="h-64 w-full rounded-xl" />
-        </div>
-      )}
+      <div className="flex flex-wrap items-center gap-3">
+        <input
+          value={q}
+          onChange={(e) => { setQ(e.target.value); setPage(0); }}
+          placeholder="Search batch id or file name"
+          className="w-72 rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-neutral-200"
+          aria-label="Search batches"
+        />
+        <label className="inline-flex items-center gap-1.5 text-neutral-400">
+          <input type="checkbox" checked={showArchived} onChange={(e) => { setShowArchived(e.target.checked); setPage(0); }} /> show archived
+        </label>
+        <span className="ml-auto text-neutral-500">{total} batch{total === 1 ? "" : "es"}</span>
+      </div>
 
+      {isLoading && <Skeleton className="h-40 w-full rounded-xl" />}
       {isError && (
         <>
-          <BackendNotConnected endpoint="/batches" onRetry={() => refetch()} message="Could not load batches from the backend." />
+          <BackendNotConnected endpoint="/batches/summary" onRetry={() => refetch()} message="Could not load batches from the backend." />
           <ErrorAlert error={error as Error} />
         </>
       )}
-
-      {data && batches.length === 0 && (
-        <div className="p-6 bg-neutral-900/60 border border-neutral-800 rounded-xl text-center text-neutral-400 space-y-4">
-          <p>No pipeline runs yet. Upload documents and start the pipeline from the Ingestion page.</p>
-          <Link
-            to="/"
-            className="inline-flex items-center gap-1.5 px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-lg font-medium"
-          >
-            Go to Ingestion
-          </Link>
+      {data && rows.length === 0 && (
+        <div className="p-6 bg-neutral-900/60 border border-neutral-800 rounded-xl text-center text-neutral-400">
+          {q ? `No batch matches "${q}".` : "No pipeline runs yet. Upload documents and start the pipeline from the Ingestion page."}
         </div>
       )}
 
-      {batches.map((batch) => (
-        <BatchPanel key={batch.batch_id} batch={batch} onChanged={() => refetch()} collapsible />
-      ))}
+      {rows.length > 0 && (
+        <div className="overflow-x-auto rounded-xl border border-neutral-800">
+          <table className="w-full text-left">
+            <thead className="bg-neutral-900/80 text-[11px] text-neutral-500">
+              <tr>
+                <th className="w-8" /><th className="px-3 py-2">Batch</th><th className="px-3 py-2">Time</th><th className="px-3 py-2">Documents</th>
+                <th className="px-3 py-2">Status</th><th className="px-3 py-2">Score</th><th className="px-3 py-2">Warnings</th>
+                <th className="px-3 py-2">Export</th><th className="px-3 py-2">Reasoning</th><th className="px-3 py-2 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <BatchRow key={r.batch_id} row={r} open={!!open[r.batch_id]}
+                          onToggle={() => setOpen((o) => ({ ...o, [r.batch_id]: !o[r.batch_id] }))} onChanged={() => refetch()} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {total > limit && (
+        <div className="flex items-center justify-end gap-2 text-neutral-400">
+          <button type="button" disabled={page === 0} onClick={() => setPage((p) => p - 1)}
+                  className="rounded border border-neutral-700 px-2 py-1 disabled:opacity-40">Previous</button>
+          <span>{page * limit + 1}–{Math.min(total, (page + 1) * limit)} of {total}</span>
+          <button type="button" disabled={(page + 1) * limit >= total} onClick={() => setPage((p) => p + 1)}
+                  className="rounded border border-neutral-700 px-2 py-1 disabled:opacity-40">Next</button>
+        </div>
+      )}
     </div>
   );
+};
+
+const BatchRow: React.FC<{ row: BatchSummaryRow; open: boolean; onToggle: () => void; onChanged: () => void }> = ({ row, open, onToggle, onChanged }) => {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const act = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    setErr(null);
+    try { await fn(); onChanged(); } catch (e) { setErr((e as Error).message); } finally { setBusy(false); setConfirmDelete(false); }
+  };
+  return (
+    <>
+      <tr className={`border-t border-neutral-800 align-top ${row.archived ? "opacity-60" : ""}`}>
+        <td className="px-2 py-2">
+          <button type="button" onClick={onToggle} aria-expanded={open} aria-label={open ? "Collapse batch" : "Expand batch"}
+                  className="rounded p-1 text-neutral-400 hover:bg-neutral-800">
+            {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+          </button>
+        </td>
+        <td className="px-3 py-2 font-mono text-neutral-200"><Link to={`/batch?id=${row.batch_id}`} className="hover:text-sky-300">{row.batch_id}</Link></td>
+        <td className="px-3 py-2 text-neutral-400">{formatBackendDate(row.created_at)}</td>
+        <td className="px-3 py-2 text-neutral-300" title={row.documents.map((d) => d.filename).join("\n")}>
+          {row.document_count} · <span className="text-neutral-500">{row.documents.slice(0, 2).map((d) => d.filename).join(", ")}{row.document_count > 2 ? "…" : ""}</span>
+          {row.unread_pages > 0 && <span className="ml-2 rounded bg-rose-500/15 px-1.5 py-0.5 text-[10px] text-rose-300">{row.unread_pages} page(s) unread</span>}
+        </td>
+        <td className="px-3 py-2"><StatusBadge status={row.status} /></td>
+        <td className="px-3 py-2 font-mono">{row.score == null ? <span className="text-neutral-500">—</span> : <ConfidenceIndicator confidence={row.score} size="sm" />}</td>
+        <td className="px-3 py-2 font-mono text-amber-300">{row.warnings_count || <span className="text-neutral-600">0</span>}</td>
+        <td className="px-3 py-2 text-[11px]" title={row.export_errors.map((e) => `${e.format}: ${e.code} ${e.reason || e.message}`).join("\n")}>
+          <span className={row.export_status === "ready" ? "text-emerald-300" : row.export_status === "failed" || row.export_status === "partial" ? "text-rose-300" : "text-neutral-400"}>
+            {row.export_status}
+          </span>
+        </td>
+        <td className="px-3 py-2 text-[11px] text-neutral-300">{row.analysis_status}</td>
+        <td className="px-3 py-2 text-right whitespace-nowrap">
+          <button type="button" disabled={busy} onClick={() => act(() => archiveBatch(row.batch_id, !row.archived))}
+                  className="rounded border border-neutral-700 px-2 py-0.5 text-[11px] text-neutral-300 hover:bg-neutral-800">
+            {row.archived ? "Unarchive" : "Archive"}
+          </button>{" "}
+          {confirmDelete ? (
+            <>
+              <button type="button" disabled={busy} onClick={() => act(() => deleteBatch(row.batch_id))}
+                      className="rounded border border-rose-600 bg-rose-600/20 px-2 py-0.5 text-[11px] text-rose-200">Confirm delete</button>{" "}
+              <button type="button" onClick={() => setConfirmDelete(false)} className="text-[11px] text-neutral-400 underline">cancel</button>
+            </>
+          ) : (
+            <button type="button" disabled={busy} onClick={() => setConfirmDelete(true)}
+                    className="rounded border border-neutral-700 px-2 py-0.5 text-[11px] text-rose-300 hover:bg-neutral-800">Delete</button>
+          )}
+          {err && <div className="text-[10px] text-rose-300">{err}</div>}
+        </td>
+      </tr>
+      {open && (
+        <tr className="border-t border-neutral-800">
+          <td colSpan={10} className="bg-neutral-950/40 p-3"><BatchDetail batchId={row.batch_id} onChanged={onChanged} /></td>
+        </tr>
+      )}
+    </>
+  );
+};
+
+/** Full batch detail, fetched only when its row is opened. */
+const BatchDetail: React.FC<{ batchId: string; onChanged: () => void }> = ({ batchId, onChanged }) => {
+  const { config } = useConfig();
+  const pollInterval = config?.poll_interval_ms || 2000;
+  const { data, isLoading, isError, error, refetch } = useQuery({
+    queryKey: ["batchStatus", batchId],
+    queryFn: ({ signal }) => getBatch(batchId, signal),
+    refetchInterval: (query) => (query.state.status === "error" ? false : isActive(query.state.data) ? pollInterval : false),
+  });
+  if (isLoading) return <Skeleton className="h-40 w-full rounded-lg" />;
+  if (isError) return <ErrorAlert error={error as Error} />;
+  return data ? <BatchPanel batch={data} onChanged={() => { refetch(); onChanged(); }} /> : null;
 };
 
 /** /batch?id=… : one batch, polled until it finishes. */
@@ -272,6 +403,11 @@ const BatchPanel: React.FC<{ batch: BatchSummary; onChanged: () => void; collaps
           {batch.output_formats && batch.output_formats.length > 0 && <span>Formats: {batch.output_formats.join(", ")}</span>}
         </div>
 
+        {batch.notices && batch.notices.length > 0 && (
+          <ul className="space-y-0.5 text-[11px] text-sky-200">
+            {batch.notices.map((n, i) => <li key={i}><span className="font-mono text-sky-300">{n.code}</span> {n.message}</li>)}
+          </ul>
+        )}
         {(batch.exports?.length || batch.export_errors?.length || batch.stage === "exporting") && (
           <div className="space-y-2">
             {batch.stage === "exporting" && <div className="text-neutral-500">Generating downloads…</div>}
@@ -293,7 +429,8 @@ const BatchPanel: React.FC<{ batch: BatchSummary; onChanged: () => void; collaps
               <ul className="space-y-1 text-rose-300" role="alert">
                 {batch.export_errors.map((failure) => (
                   <li key={`${failure.format}:${failure.code}`}>
-                    {failure.format.toUpperCase()} export failed: {failure.message}
+                    {failure.format.toUpperCase()} export failed: <span className="font-mono">{failure.code}</span>{" "}
+                    {(failure as { reason?: string }).reason || failure.message}
                   </li>
                 ))}
               </ul>
@@ -505,8 +642,75 @@ const WarningsList: React.FC<{ warnings: { code: string; message: string }[] }> 
 
 const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
 
+const PAGE_STATUS_STYLE: Record<string, string> = {
+  ok: "text-emerald-300", partial: "text-amber-300", needs_ocr: "text-rose-300", unreadable: "text-rose-300", blank: "text-neutral-500",
+};
+const PAGE_STATUS_TEXT: Record<string, string> = {
+  ok: "read", partial: "partly read", needs_ocr: "page unread: needs OCR", unreadable: "page unread", blank: "blank page",
+};
+
+type Row = { kind: "block"; block: Block } | { kind: "shreds"; blocks: Block[] };
+
+/** Consecutive tiny text fragments (single characters etc.) are grouped into one expandable row. */
+function groupShreds(blocks: Block[], maxChars: number, minRun: number): Row[] {
+  const rows: Row[] = [];
+  let run: Block[] = [];
+  const flush = () => {
+    if (run.length >= minRun) rows.push({ kind: "shreds", blocks: run });
+    else run.forEach((b) => rows.push({ kind: "block", block: b }));
+    run = [];
+  };
+  for (const b of blocks) {
+    if (b.type === "text" && (b.raw_text ?? "").trim().length <= maxChars) run.push(b);
+    else { flush(); rows.push({ kind: "block", block: b }); }
+  }
+  flush();
+  return rows;
+}
+
+/** Renders rows in chunks; the next chunk is added when the end of the list scrolls into view. */
+const ChunkedList: React.FC<{ rows: Row[]; chunk: number; render: (r: Row) => React.ReactNode }> = ({ rows, chunk, render }) => {
+  const [n, setN] = useState(chunk);
+  const sentinel = React.useRef<HTMLLIElement | null>(null);
+  React.useEffect(() => {
+    const el = sentinel.current;
+    if (!el || n >= rows.length || typeof IntersectionObserver === "undefined") return;
+    const io = new IntersectionObserver((entries) => { if (entries.some((e) => e.isIntersecting)) setN((x) => x + chunk); });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [n, rows.length, chunk]);
+  return (
+    <>
+      {rows.slice(0, n).map(render)}
+      {n < rows.length && (
+        <li ref={sentinel} className="px-3 py-2 text-center">
+          <button type="button" onClick={() => setN((x) => x + chunk)} className="text-[10px] text-sky-300 underline">
+            {rows.length - n} more
+          </button>
+        </li>
+      )}
+    </>
+  );
+};
+
+const ShredRow: React.FC<{ blocks: Block[] }> = ({ blocks }) => {
+  const [open, setOpen] = useState(false);
+  return (
+    <li className="px-3 py-2 space-y-1">
+      <button type="button" onClick={() => setOpen((v) => !v)} className="text-left text-[11px] text-amber-200">
+        {blocks.length} short fragments: <span className="font-mono">{blocks.map((b) => b.raw_text).join(" ").slice(0, 80)}</span>
+      </button>
+      {open && <ul className="pl-3 font-mono text-[10px] text-neutral-400">{blocks.map((b) => <li key={b.block_id}>{b.raw_text} · {Math.round(b.confidence * 100)}%</li>)}</ul>}
+    </li>
+  );
+};
+
 /** One independent column per parsed page, side by side. */
 const PageColumns: React.FC<{ sourceId: string; version: string }> = ({ sourceId, version }) => {
+  const { config } = useConfig();
+  const chunk = config?.ui?.block_render_chunk || 40;
+  const maxChars = config?.ui?.shred_max_chars ?? 2;
+  const minRun = config?.ui?.shred_min_run ?? 3;
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["batchSourceDocument", sourceId, version],
     queryFn: ({ signal }) => getSourceDocument(sourceId, signal),
@@ -515,44 +719,70 @@ const PageColumns: React.FC<{ sourceId: string; version: string }> = ({ sourceId
 
   if (isLoading) return <Skeleton className="h-64 w-[300px] rounded-lg" />;
   if (isError) return <ErrorAlert error={error as Error} />;
-  const pages = data?.pages ?? [];
+  const pages: PageUnit[] = data?.pages ?? [];
   if (!pages.length) return null;
 
   return (
     <div className="flex items-stretch gap-2">
       {pages.map((pg) => {
         const blocks = [...pg.blocks].sort((a, b) => (a.reading_order_index ?? 0) - (b.reading_order_index ?? 0));
-        const conf = mean(blocks.map((b) => b.confidence));
         const review = blocks.filter((b) => b.needs_review).length;
+        const status = pg.status || "ok";
+        const unread = status === "needs_ocr" || status === "unreadable";
+        const score = pg.page_score?.value;
         return (
-          <div key={pg.page_id} className="w-[300px] shrink-0 flex flex-col border border-neutral-800 rounded-lg bg-neutral-900/40 overflow-hidden">
-            <div className="px-3 py-2 bg-neutral-900 border-b border-neutral-800 space-y-1">
+          <div key={pg.page_id} className={`w-[300px] shrink-0 flex flex-col rounded-lg bg-neutral-900/40 overflow-hidden border ${unread ? "border-rose-500/60" : "border-neutral-800"}`}>
+            <div className={`px-3 py-2 border-b space-y-1 ${unread ? "bg-rose-500/10 border-rose-500/40" : "bg-neutral-900 border-neutral-800"}`}>
               <div className="flex items-center justify-between gap-2">
                 <span className="font-semibold text-neutral-100">Page {pg.page_number}</span>
-                {conf !== null && <ConfidenceIndicator confidence={conf} size="sm" />}
+                {score == null ? <span className="text-[10px] text-neutral-500">not scored</span> : (
+                  <span title={`${pg.page_score?.formula ?? ""}${pg.page_score?.cap_reason ? ` · capped: ${pg.page_score.cap_reason}` : ""}`}>
+                    <ConfidenceIndicator confidence={score} size="sm" />
+                  </span>
+                )}
               </div>
               <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] font-mono text-neutral-500">
+                <span className={PAGE_STATUS_STYLE[status] || ""}>{PAGE_STATUS_TEXT[status] || status}</span>
                 <span>{pg.layout_class}</span>
                 <span>{blocks.length} blocks</span>
                 <span>order {pct(pg.reading_order_confidence)}</span>
+                {pg.coverage_score != null && <span title="share of the printed page covered by extracted blocks">coverage {pct(pg.coverage_score)}</span>}
+                {(pg.uncovered_regions?.length ?? 0) > 0 && <span className="text-amber-300">{pg.uncovered_regions!.length} uncovered region(s)</span>}
                 {review > 0 && <span className="text-amber-300">{review} need review</span>}
               </div>
             </div>
             <ol className="flex-1 max-h-[60vh] overflow-y-auto divide-y divide-neutral-800/80">
-              {blocks.map((block) => (
-                <li key={block.block_id} className="px-3 py-2 space-y-1">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-[10px] text-sky-300">{block.type}</span>
-                    <ConfidenceIndicator confidence={block.confidence} size="sm" />
-                  </div>
-                  <BlockBody block={block} />
-                  <div className="text-[10px] font-mono text-neutral-500">
-                    {block.extraction_method}
-                    {block.needs_review && <span className="ml-2 text-amber-300">needs review</span>}
-                  </div>
+              {unread && (
+                <li className="px-3 py-3 text-[11px] text-rose-200">
+                  This page has printed content but nothing was extracted
+                  {status === "needs_ocr" ? " because no OCR engine is available (see the document warning)." : "."}
                 </li>
-              ))}
-              {blocks.length === 0 && <li className="px-3 py-2 text-neutral-500">No content on this page.</li>}
+              )}
+              <ChunkedList
+                rows={groupShreds(blocks, maxChars, minRun)}
+                chunk={chunk}
+                render={(r) =>
+                  r.kind === "shreds" ? <ShredRow key={r.blocks[0].block_id} blocks={r.blocks} /> : (
+                    <li key={r.block.block_id} className="px-3 py-2 space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono text-[10px] text-sky-300">{r.block.type}</span>
+                        <ConfidenceIndicator confidence={r.block.confidence} size="sm" />
+                      </div>
+                      <BlockBody block={r.block} />
+                      <div className="text-[10px] font-mono text-neutral-500">
+                        {r.block.extraction_method}
+                        {r.block.needs_review && (
+                          <span className="ml-2 text-amber-300">
+                            needs review{(r.block as { review_reasons?: string[] }).review_reasons?.length ? `: ${(r.block as { review_reasons?: string[] }).review_reasons!.join(", ")}` : ""}
+                          </span>
+                        )}
+                        {(r.block.warnings ?? []).map((w) => <span key={w.code} className="ml-2 text-neutral-400">{w.code}</span>)}
+                      </div>
+                    </li>
+                  )
+                }
+              />
+              {blocks.length === 0 && !unread && <li className="px-3 py-2 text-neutral-500">No content on this page.</li>}
             </ol>
           </div>
         );
@@ -596,13 +826,32 @@ const BlockBody: React.FC<{ block: Block }> = ({ block }) => {
     );
   }
 
-  if (block.type === "figure" && "crop_url" in block) {
-    const f = block as FigureBlock;
+  if ((block.type === "figure" || block.type === "chart") && "crop_url" in block) {
+    const f = block as FigureBlock & { text_inside?: string | null; interpreted?: boolean; title?: string | null; labels?: { text: string }[] };
     const src = f.crop_url?.startsWith("http") ? f.crop_url : f.crop_url ? getApiUrl(f.crop_url) : "";
     return (
       <div className="space-y-1">
-        {src && <img src={src} alt={f.caption || "Figure"} loading="lazy" className="max-h-32 rounded border border-neutral-800" />}
-        {(f.caption || f.raw_text) && <div className="text-neutral-300">{f.caption || f.raw_text}</div>}
+        {src && <img src={src} alt={f.caption || block.type} loading="lazy" className="max-h-32 rounded border border-neutral-800" />}
+        <div className="text-neutral-300">{f.caption || f.title || <span className="text-neutral-500">no caption found</span>}</div>
+        {f.text_inside && <div className="text-[10px] text-neutral-400">text inside: {f.text_inside}</div>}
+        {f.labels && f.labels.length > 0 && <div className="text-[10px] text-neutral-400">labels: {f.labels.map((l) => l.text).join(" · ")}</div>}
+        {f.interpreted === false && (
+          <div className="text-[10px] text-amber-300/80">
+            {block.type === "chart" ? "chart detected; data series not digitised" : "image content not interpreted"}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (block.type === "equation") {
+    const e = block as Block & { latex?: string | null; latex_unavailable_reason?: string; fragments?: string[] };
+    return (
+      <div className="space-y-0.5">
+        <pre className="whitespace-pre-wrap rounded bg-neutral-950 px-2 py-1 font-mono text-[11px] text-neutral-100">{e.raw_text}</pre>
+        <div className="text-[10px] text-neutral-500">
+          {e.fragments ? `${e.fragments.length} fragment(s) merged · ` : ""}{e.latex ? `LaTeX: ${e.latex}` : e.latex_unavailable_reason || "no LaTeX"}
+        </div>
       </div>
     );
   }

@@ -36,6 +36,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from backend import page_analysis as pa
+from backend import page_quality as pq
 
 router = APIRouter()
 
@@ -50,7 +51,7 @@ _JOBS: Dict[str, str] = {}  # job_id -> batch_id
 _SOURCES: Dict[str, dict] = {}  # source_id -> processing state
 _CASES: Dict[str, dict] = {}
 
-PAGINATED_KINDS = {"pdf", "image", "docx", "pptx"}
+PAGINATED_KINDS = {"pdf", "image", "docx", "pptx", "url"}
 OCR_CLASSES = {"scanned", "mixed", "image_only"}
 NATIVE_CLASSES = {"native_text", "mixed"}
 
@@ -93,6 +94,94 @@ def _meta(source_id: str) -> Optional[dict]:
     if not meta or meta.get("tenant_id") != _user().get("tenant_id"):
         return None
     return meta
+
+
+def _document_access_error(source_id: str):
+    user = _user()
+    if user.get("role") == "admin":
+        return None
+    access_agent = _agent("23_access_control")
+    if access_agent._document_access(user, source_id):
+        return None
+    return _err(403, "FORBIDDEN", "Admin approval is required to access this document")
+
+
+def _source_list_access_error(source_ids: List[str]):
+    denied = [source_id for source_id in source_ids if _document_access_error(source_id)]
+    if denied:
+        return _err(403, "FORBIDDEN", "Admin approval is required to access one or more documents",
+                    {"source_ids": denied})
+    return None
+
+
+def _case_access_error(case: dict):
+    return _source_list_access_error(list(case.get("source_ids") or []))
+
+
+def register_url_source(record: dict, tenant_id: str, decrypt) -> None:
+    """Expose the guarded DOM snapshot as a parsed source consumable by cases and batches."""
+    source_id = str(record["source_id"])
+    aad = f"{tenant_id}:{source_id}".encode("utf-8")
+    extracted = decrypt(record["text_blob"], aad)
+    if isinstance(extracted, bytes):
+        extracted = extracted.decode("utf-8")
+    elements = __import__("json").loads(extracted).get("elements") or []
+    page_meta = record["page"]
+    width, height = int(page_meta["page_width"]), int(page_meta["page_height"])
+    blocks = []
+    for element in elements:
+        text = str(element.get("text") or "").strip()
+        if not text:
+            continue
+        raw_bbox = element.get("bbox") or [0, 0, 0, 0]
+        x1, y1, x2, y2 = [int(value) for value in raw_bbox]
+        bbox = [max(0, min(width, x1)), max(0, min(height, y1)),
+                max(0, min(width, x2)), max(0, min(height, y2))]
+        confidence = max(0.0, min(1.0, float(element.get("confidence", 1.0))))
+        blocks.append({
+            "block_id": f"{page_meta['page_id']}_dom_{len(blocks)}",
+            "type": "text", "source_id": source_id, "page_id": page_meta["page_id"],
+            "unit_id": page_meta["page_id"], "reading_order_index": len(blocks),
+            "location": _location({"bbox": bbox, "page_width": width, "page_height": height}, "dom_text"),
+            "confidence": confidence, "confidence_breakdown": {"dom_text_extraction": confidence},
+            "extraction_method": "web_dom", "raw_text": text,
+            "needs_review": confidence < 0.85, "warnings": [],
+        })
+
+    warnings = list(record.get("warnings") or [])
+    page = {
+        "source_id": source_id, "page_id": page_meta["page_id"], "page_number": 1,
+        "page_width": width, "page_height": height, "layout_class": "web_dom",
+        "reading_order_confidence": 0.9, "status": "ok" if blocks else "unreadable",
+        "coverage_score": None, "uncovered_regions": [], "blocks": blocks, "warnings": warnings,
+        "links": list(record.get("links") or []), "image_available": bool(record.get("snapshot_blob")),
+        "page_score": {"value": min((b["confidence"] for b in blocks), default=0.0),
+                       "components": {"dom_text_extraction": 1.0}, "formula": "DOM-extracted text"},
+    }
+    store = _store()
+    meta = {
+        "source_id": source_id, "tenant_id": tenant_id, "owner_id": record.get("registered_by"),
+        "sanitized_filename": f"{re.sub(r'[^A-Za-z0-9._-]+', '_', str(record.get('display_name') or 'website')).strip('_')}.html",
+        "sha256": record.get("sha256", ""), "detected_mime": "text/html",
+        "size_bytes": int(record.get("content_size_bytes") or 0), "page_count": 1,
+        "origin": {"type": "url", "url": record["origin"]["url"], "links": page["links"]},
+        "created_at": record.get("fetched_at"), "status": "accepted", "url_ingested": True,
+        "warnings": warnings,
+    }
+    store.put("source_meta", source_id, meta)
+    store.put("url_page", source_id, page)
+    if record.get("snapshot_blob"):
+        from backend.agents import _support as support
+        png = decrypt(record["snapshot_blob"], aad)
+        support.put_blob("page_image", f"{source_id}:1", png, tenant_id)
+    with _LOCK:
+        _SOURCES[source_id] = {
+            "status": "completed", "stage": "completed", "route": "web_dom",
+            "units_total": 1, "units_done": 1, "pages": {1: page}, "warnings": warnings,
+            "started_at": record.get("fetched_at"), "finished_at": record.get("fetched_at"),
+        }
+    _save_source(source_id)
+    _publish_source(source_id, meta, {1: page})
 
 
 def _error_info(exc: Exception) -> dict:
@@ -208,6 +297,30 @@ def _sheet_table(sheet: dict, source_id: str, page_id: str) -> Optional[dict]:
     }
 
 
+_OCR_INFO: Dict[str, Any] = {}
+
+
+def ocr_info() -> dict:
+    """Which OCR engine agent 04 will use, its version, and why OCR is unavailable if it is. Cached for 60 s."""
+    if _OCR_INFO.get("_ts", 0) > time.time() - 60:
+        return _OCR_INFO
+    try:
+        a04 = _agent("04_ocr")
+        info = a04.engine_info()
+    except Exception as exc:
+        info = {"available": False, "engine": None, "version": None, "reason": f"OCR agent could not load: {_error_info(exc)['message']}"}
+    _OCR_INFO.clear()
+    _OCR_INFO.update(info, _ts=time.time())
+    return _OCR_INFO
+
+
+def _ocr_unavailable_warning(source_id: str) -> dict:
+    info = ocr_info()
+    return {"code": "OCR_UNAVAILABLE", "source_id": source_id,
+            "message": f"No OCR engine is available ({info.get('reason') or 'unknown reason'}). Image-only pages and text "
+                       "inside images were not read, and native text was not cross-checked."}
+
+
 def _run_ocr(source_id: str, n: int, warnings: List[dict], methods: List[str]) -> Optional[List[dict]]:
     try:
         a04 = _agent("04_ocr")
@@ -241,13 +354,14 @@ def _run_ocr_region(source_id: str, n: int, region: List[float]) -> List[dict]:
     return lines
 
 
-def _pdf_structures(source_id: str, n: int, scale: float, cfg: dict) -> Tuple[List[dict], List[List[float]]]:
+def _pdf_structures(source_id: str, n: int, scale: float, cfg: dict) -> Tuple[List[dict], List[List[float]], List[List[float]]]:
     support = _support()
     meta = _meta(source_id) or {}
     key, loader = support.pdf_loader(source_id, meta)
     with support.open_pdf(key, loader) as doc:
         page = doc.load_page(n - 1)
-        return pa.find_tables(page, scale), pa.find_figures(page, scale, float(cfg["min_figure_area"]))
+        charts = pq.detect_charts(page, scale, pq.settings())
+        return pa.find_tables(page, scale), pa.find_figures(page, scale, float(cfg["min_figure_area"])), charts
 
 
 def _process_unit(source_id: str, kind: str, unit: dict, page_meta: dict, threshold: float) -> dict:
@@ -261,7 +375,12 @@ def _process_unit(source_id: str, kind: str, unit: dict, page_meta: dict, thresh
     pclass = unit.get("page_class", "native_text")
     pm = (page_meta.get("pages") or {}).get(str(n), {}) or {}
     cfg = pa.settings()
+    qcfg = pq.settings()
     review_below = float(cfg["agreement_review_below"])
+    ocr_ok = bool(ocr_info().get("available"))
+    needed_ocr = pclass in OCR_CLASSES
+    charts: List[List[float]] = []
+    rejected_tables: List[dict] = []
     warnings: List[dict] = []
     blocks: List[dict] = []
     methods: List[str] = []
@@ -271,11 +390,14 @@ def _process_unit(source_id: str, kind: str, unit: dict, page_meta: dict, thresh
 
     def text_block(i: int, method: str, text: str, loc: dict, conf: float, breakdown: dict,
                    alt: Optional[dict], agr: Optional[float]) -> dict:
+        # needs_review only for genuine uncertainty (see page_quality.review_reasons); a missing cross-check is a
+        # document-level warning plus a capped document score, never a per-block flag.
+        reasons = pq.review_reasons(text, conf, threshold, agr, review_below)
         b = {
             "block_id": f"{page_id}_{method}_{i}", "type": "text", "source_id": source_id, "page_id": page_id,
             "unit_id": page_id, "reading_order_index": 0, "location": _location(loc, "not_located"),
             "confidence": conf, "confidence_breakdown": breakdown, "extraction_method": method, "raw_text": text,
-            "needs_review": conf < threshold or (agr is not None and agr < review_below), "warnings": [],
+            "needs_review": bool(reasons), "review_reasons": reasons, "warnings": [],
         }
         if alt:
             b["alternatives"] = [alt]
@@ -294,20 +416,33 @@ def _process_unit(source_id: str, kind: str, unit: dict, page_meta: dict, thresh
                 warnings.append({"code": "NATIVE_TEXT_FAILED", "message": _error_info(exc)["message"], "source_id": source_id})
 
         ocr_lines: Optional[List[dict]] = None
-        if paginated and (pclass in OCR_CLASSES or (native and cfg["ocr_cross_check"] and n <= int(cfg["max_cross_check_pages"]))):
+        wants_ocr = paginated and (pclass in OCR_CLASSES or (native and cfg["ocr_cross_check"] and n <= int(cfg["max_cross_check_pages"])))
+        if wants_ocr and not ocr_ok:
+            warnings.append(_ocr_unavailable_warning(source_id))  # identical on every page -> reported once per document
+        elif wants_ocr:
             ocr_lines = _run_ocr(source_id, n, warnings, methods)
             if ocr_lines is None and native:
                 warnings.append({"code": "CONFIDENCE_NOT_CROSS_CHECKED", "source_id": source_id,
-                                 "message": f"Page {n}: OCR was unavailable, so native text confidence is the text-layer quality only"})
+                                 "message": "OCR failed on some pages, so their native text confidence is the text-layer quality only"})
 
         tables: List[dict] = []
         figures: List[List[float]] = []
         if kind in ("pdf", "docx", "pptx") and native:
             scale = float(pm.get("scale") or 0) or (width / max(1.0, float(pm.get("width_pt") or width or 1)))
             try:
-                tables, figures = _pdf_structures(source_id, n, scale, cfg)
+                tables, figures, charts = _pdf_structures(source_id, n, scale, cfg)
             except Exception as exc:
                 warnings.append({"code": "STRUCTURE_DETECTION_FAILED", "message": _error_info(exc)["message"], "source_id": source_id})
+            kept = []
+            for t in tables:  # a table needs a real grid; edge lists, titles, sentences and charts are rejected
+                ok, why = pq.validate_table(t, charts, qcfg)
+                if ok:
+                    kept.append(t)
+                else:
+                    rejected_tables.append({"bbox": t["bbox"], "reason": why})
+            tables = kept
+            # an image that is really a chart region is reported once, as the chart
+            figures = [fb for fb in figures if not any(pq._inside(fb, ch) for ch in charts)]
         table_boxes = [t["bbox"] for t in tables]
 
         # Focused re-reads: full-page OCR often skips ruled table rows or small isolated text. Re-read those regions
@@ -399,18 +534,48 @@ def _process_unit(source_id: str, kind: str, unit: dict, page_meta: dict, thresh
                 "warnings": [], "n_rows": len(t["rows"]), "n_cols": t["n_cols"], "cells": cells,
             })
 
+        crop = lambda bb: f"/sources/{source_id}/pages/{n}/crop?bbox=" + ",".join(f"{v:.1f}" for v in bb)  # noqa: E731
         for f_i, fb in enumerate(figures):
             inside = [b for b in blocks if b["type"] == "text" and b["location"]["bbox"] and pa.center_inside(b["location"]["bbox"], fb)]
+            if not inside and ocr_lines is None and ocr_ok and paginated:
+                # an image region with no text read yet: OCR it on its own
+                for k, ln in enumerate(_run_ocr_region(source_id, n, list(fb))):
+                    blk = text_block(1000 + 100 * f_i + k, "ocr", ln["text"], ln["location"], round(ln["confidence"], 4),
+                                     {"ocr_engine_confidence": round(ln["confidence"], 4), "text_layer_present": 0.0}, None, None)
+                    blocks.append(blk)
+                    inside.append(blk)
+            cap = pq.find_caption(fb, [b for b in blocks if b["type"] == "text"], float(height or 1), qcfg)
             fid = f"{page_id}_figure_{f_i}"
             blocks.append({
                 "block_id": fid, "type": "figure", "figure_id": fid, "source_id": source_id, "page_id": page_id,
                 "unit_id": page_id, "reading_order_index": 0, "location": loc_px(fb),
                 # The figure's placement comes from the PDF object model (exact); text read inside it is OCR.
                 "confidence": 1.0, "confidence_breakdown": {"pdf_image_object": 1.0, "ocr_text_blocks_inside": len(inside)},
-                "extraction_method": "pdf_image_object", "needs_review": False, "warnings": [],
-                "crop_url": f"/sources/{source_id}/pages/{n}/crop?bbox=" + ",".join(f"{v:.1f}" for v in fb),
-                **({"caption": " ".join(b["raw_text"] for b in inside)[:300]} if inside else {}),
+                "extraction_method": "pdf_image_object", "needs_review": False, "review_reasons": [],
+                "interpreted": False,
+                "warnings": [{"code": "FIGURE_NOT_INTERPRETED", "message": "The image content is not interpreted; only its placement, caption and any text inside are extracted"}],
+                "crop_url": crop(fb),
+                "caption": cap["raw_text"][:300] if cap else None, "caption_block_id": cap["block_id"] if cap else None,
+                "text_inside": " ".join(b["raw_text"] for b in inside)[:300] or None,
             })
+        for c_i, cb in enumerate(charts):
+            cap = pq.find_caption(cb, [b for b in blocks if b["type"] == "text"], float(height or 1), qcfg)
+            # axis labels and legends inside the chart belong to the chart, not to the page's running text
+            labels = [b for b in blocks if b["type"] == "text" and b is not cap and b["location"].get("bbox")
+                      and pq._inside(b["location"]["bbox"], cb)]
+            blocks = [b for b in blocks if not any(b is l for l in labels)]
+            cid = f"{page_id}_chart_{c_i}"
+            blocks.append({
+                "block_id": cid, "type": "chart", "chart_id": cid, "source_id": source_id, "page_id": page_id,
+                "unit_id": page_id, "reading_order_index": 0, "location": loc_px(cb),
+                "confidence": 1.0, "confidence_breakdown": {"vector_axes_detected": 1.0},
+                "extraction_method": "vector_chart_detector", "needs_review": False, "review_reasons": [],
+                "interpreted": False, "series": None, "crop_url": crop(cb),
+                "title": cap["raw_text"][:300] if cap else None, "caption": cap["raw_text"][:300] if cap else None,
+                "labels": [{"text": l["raw_text"], "bbox": l["location"]["bbox"], "confidence": l["confidence"]} for l in labels],
+                "warnings": [{"code": "CHART_EXTRACTION_UNAVAILABLE", "message": "A chart was detected; its data series are not digitised"}],
+            })
+        blocks = pq.merge_equations(blocks, n, crop, qcfg, review_below)
 
     if not width and blocks:
         width = max((b["location"]["page_width"] for b in blocks), default=0)
@@ -419,8 +584,8 @@ def _process_unit(source_id: str, kind: str, unit: dict, page_meta: dict, thresh
 
     # Reading order over text and tables; each figure is placed just before the first block read inside it
     # (its caption/OCR text), otherwise by its top edge.
-    figs = [b for b in blocks if b["type"] == "figure"]
-    located = [(b["location"]["bbox"], b) for b in blocks if b["location"]["bbox"] and b["type"] != "figure"]
+    figs = [b for b in blocks if b["type"] in ("figure", "chart")]
+    located = [(b["location"]["bbox"], b) for b in blocks if b["location"]["bbox"] and b["type"] not in ("figure", "chart")]
     unlocated = [b for b in blocks if not b["location"]["bbox"]]
     ordered, uncertain = pa.xy_cut(located, float(width or 1), float(height or 1)) if located else ([], 0)
     for fb in figs:
@@ -432,11 +597,28 @@ def _process_unit(source_id: str, kind: str, unit: dict, page_meta: dict, thresh
     blocks = ordered + unlocated
     for i, b in enumerate(blocks):
         b["reading_order_index"] = i
-    ro_conf = round(1.0 - uncertain / len(located), 4) if located else 0.0
+    ro_conf = round(1.0 - uncertain / len(located), 4) if located else (1.0 if blocks else 0.0)
+    coverage, uncovered = None, []
+    if paginated and kind not in ("xlsx", "csv"):
+        try:
+            png, _, _ = _support().get_page_image(source_id, n, _meta(source_id) or {})
+            coverage, uncovered, _ = pq.ink_coverage(png, [b["location"]["bbox"] for b in blocks if b["location"].get("bbox")], qcfg)
+        except Exception as exc:
+            warnings.append({"code": "COVERAGE_UNAVAILABLE", "source_id": source_id, "message": _error_info(exc)["message"]})
+    status = pq.page_status(bool(blocks), coverage, needed_ocr, ocr_ok, qcfg)
+    mean_conf = round(sum(b["confidence"] for b in blocks) / len(blocks), 4) if blocks else None
+    # Page score: never above its reading-order confidence (the document cap is applied once all pages are done).
+    page_score = None if mean_conf is None else round(min(mean_conf, ro_conf), 4)
     return {
         "page_id": page_id, "source_id": source_id, "unit_id": page_id, "page_number": n,
         "width": width, "height": height, "rotation": rotation, "layout_class": pclass,
         "reading_order_confidence": ro_conf,
+        "status": status, "coverage_score": coverage,
+        "uncovered_regions": [{"bbox": r, "coordinate_system": "pixel_top_left", "page_width": width, "page_height": height}
+                              for r in uncovered],
+        "page_score": {"value": page_score, "components": {"mean_block_confidence": mean_conf, "reading_order_confidence": ro_conf},
+                       "formula": "min(mean block confidence, reading-order confidence[, document cap])"},
+        "rejected_tables": rejected_tables,
         "blocks": blocks, "_warnings": warnings, "_methods": methods,
     }
 
@@ -453,7 +635,9 @@ def _process_spreadsheet(source_id: str, units: List[dict]) -> List[dict]:
         pages.append({
             "page_id": unit["unit_id"], "source_id": source_id, "unit_id": unit["unit_id"],
             "page_number": int(unit["page_number"]), "width": 0, "height": 0, "rotation": 0,
-            "layout_class": "spreadsheet", "reading_order_confidence": 1.0,
+            "layout_class": "spreadsheet", "reading_order_confidence": 1.0, "status": "ok", "coverage_score": None,
+            "uncovered_regions": [], "page_score": {"value": table["confidence"] if table else None,
+                                                    "components": {"read_from_file": 1.0}, "formula": "cells read from the file"},
             "blocks": [table] if table else [], "_warnings": warnings if i == 0 else [], "_methods": ["spreadsheet"],
         })
     return pages
@@ -584,6 +768,16 @@ def _run_source(batch_id: str, source_id: str) -> None:
             raise support.AgentError(support.Code.NOT_FOUND, "Source not found")
         if meta.get("status") != "accepted":
             raise support.AgentError(support.Code.INVALID_INPUT, "Source was not accepted by file validation")
+        if meta.get("url_ingested"):
+            page = _store().get("url_page", source_id)
+            if not isinstance(page, dict):
+                raise support.AgentError(support.Code.NOT_FOUND, "The rendered website page is unavailable")
+            page_map = {1: page}
+            _set_source(source_id, status="completed", stage="completed", route="web_dom",
+                        units_total=1, units_done=1, pages=page_map, warnings=page.get("warnings") or [],
+                        finished_at=time.time())
+            _publish_source(source_id, meta, page_map)
+            return
         kind = support.kind_of(meta.get("detected_mime", ""))
 
         a02 = _agent("02_format_router")
@@ -618,6 +812,23 @@ def _run_source(batch_id: str, source_id: str) -> None:
         # The same warning from every page (e.g. "used fallback OCR engine") is reported once per document.
         seen_w: set = set()
         warnings = [w for w in warnings if not ((w.get("code"), w.get("message")) in seen_w or seen_w.add((w.get("code"), w.get("message"))))]
+        unread = [p["page_number"] for p in page_map.values() if p.get("status") in ("needs_ocr", "unreadable")]
+        if unread:
+            warnings.append({"code": "PAGES_UNREAD", "source_id": source_id,
+                             "message": f"{len(unread)} page(s) have printed content but nothing was extracted: "
+                                        + ", ".join(str(x) for x in unread[:30]),
+                             "pages": unread})
+        # Page scores never exceed the document cap (e.g. OCR unavailable -> text not cross-checked).
+        all_blocks = [b for p in page_map.values() for b in p["blocks"]]
+        # PAGES_UNREAD caps the document, not the pages that were read
+        cap = _parse_score(all_blocks, list(page_map.values()), [],
+                           [w for w in warnings if w.get("code") != "PAGES_UNREAD"]).get("cap") or {}
+        for p in page_map.values():
+            ps = p.get("page_score") or {}
+            if cap.get("applied") and ps.get("value") is not None and ps["value"] > cap["max"]:
+                ps["value"] = cap["max"]
+                ps["components"]["document_cap"] = cap["max"]
+                ps["cap_reason"] = cap.get("reason")
         _set_source(source_id, status="completed", stage="completed", pages=page_map, warnings=warnings,
                     finished_at=time.time())
         _publish_source(source_id, meta, page_map)
@@ -692,12 +903,7 @@ def _generate_batch_exports(batch_id: str) -> None:
                     "content_hash": result["content_hash"],
                 })
             except Exception as exc:
-                info = _error_info(exc)
-                errors.append({
-                    "format": output_format,
-                    "code": info["code"],
-                    "message": info["message"],
-                })
+                errors.append(_export_error(output_format, exc, batch_id))
     except Exception as exc:
         info = _error_info(exc)
         errors.extend({
@@ -725,6 +931,26 @@ def _generate_batch_exports(batch_id: str) -> None:
         batch["progress_percent"] = 100
         batch["finished_at"] = batch.get("finished_at") or time.time()
     _save_batch(batch_id)
+
+
+_LOG = __import__("logging").getLogger("parsefusion.pipeline")
+
+
+def _export_error(fmt: str, exc: Exception, batch_id: str) -> dict:
+    """Typed export error with the root cause (the agent wraps renderer failures as a generic "Processing failed").
+    The full traceback goes to the backend log."""
+    _LOG.error("export %s failed for batch %s", fmt, batch_id, exc_info=exc)
+    root = exc
+    while (root.__cause__ or root.__context__) is not None and root is not (root.__cause__ or root.__context__):
+        root = root.__cause__ or root.__context__
+    info = _error_info(exc)
+    code = info["code"]
+    if code == "ENGINE_FAILED" and root is not exc:
+        code = "EXPORT_RENDER_FAILED"
+    out = {"format": fmt, "code": code, "message": info["message"]}
+    if root is not exc:  # the agent wrapped the real failure: say what it was
+        out["reason"] = f"{type(root).__name__}: {root}"[:400]
+    return out
 
 
 def _refresh_batch(batch_id: str) -> None:
@@ -780,6 +1006,8 @@ def _batch_view(b: dict) -> dict:
         out["case_id"] = b["case_id"]
     out["job_id"] = b["job_id"]
     out["analysis"] = b.get("analysis") or {"status": "not_run"}
+    out["notices"] = b.get("notices") or []
+    out["archived"] = bool(b.get("archived"))
     out["sources"] = []
     for s in b["source_ids"]:
         st = _SOURCES.get(s, {})
@@ -806,13 +1034,43 @@ class RetryIn(BaseModel):
     source_id: str
 
 
+def _dedupe_by_hash(source_ids: List[str]) -> Tuple[List[str], List[dict]]:
+    """Identical files (same sha256) are processed once per batch; earlier processed copies are pointed out."""
+    keep, notices, seen = [], [], {}
+    for sid in source_ids:
+        meta = _meta(sid) or {}
+        h = meta.get("sha256")
+        if h and h in seen:
+            notices.append({"code": "DUPLICATE_FILE_SKIPPED", "source_id": sid, "duplicate_of": seen[h],
+                            "message": f"{meta.get('sanitized_filename', sid)} is identical (sha256) to "
+                                       f"{(_meta(seen[h]) or {}).get('sanitized_filename', seen[h])}; processed once"})
+            continue
+        if h:
+            seen[h] = sid
+        keep.append(sid)
+    with _LOCK:
+        for sid in keep:
+            h = (_meta(sid) or {}).get("sha256")
+            earlier = next((b for b in sorted(_BATCHES.values(), key=lambda b: -b.get("created_ts", 0))
+                            if not b.get("archived") and any((_meta(x) or {}).get("sha256") == h and x != sid for x in b["source_ids"])), None)
+            if h and earlier:
+                notices.append({"code": "DUPLICATE_OF_EARLIER_BATCH", "source_id": sid, "batch_id": earlier["batch_id"],
+                                "message": f"{(_meta(sid) or {}).get('sanitized_filename', sid)} was already processed in batch "
+                                           f"{earlier['batch_id']}"})
+    return keep, notices
+
+
 @router.post("/batches")
 def create_batch(body: CreateBatchIn):
-    source_ids = list(dict.fromkeys(body.source_ids))
+    source_ids, dup_notices = _dedupe_by_hash(list(dict.fromkeys(body.source_ids)))
     output_formats = list(dict.fromkeys(body.output_formats))
     missing = [s for s in source_ids if not _meta(s)]
     if missing:
         return _err(404, "NOT_FOUND", "Unknown source_id(s)", {"source_ids": missing})
+    denied = [source_id for source_id in source_ids if _document_access_error(source_id)]
+    if denied:
+        return _err(403, "FORBIDDEN", "Admin approval is required to process one or more documents",
+                    {"source_ids": denied})
     not_accepted = [s for s in source_ids if (_meta(s) or {}).get("status") != "accepted"]
     if not_accepted:
         return _err(400, "INVALID_INPUT", "Only accepted sources can be processed", {"source_ids": not_accepted})
@@ -827,7 +1085,7 @@ def create_batch(body: CreateBatchIn):
             "status": "queued", "stage": "queued", "progress_percent": 0, "source_ids": source_ids,
             "case_id": body.case_id, "mode": body.mode, "output_formats": output_formats,
             "sources_summary": {"total": len(source_ids), "completed": 0, "failed": 0},
-            "analysis": {"status": "pending"},
+            "analysis": {"status": "pending"}, "notices": dup_notices,
         }
         _JOBS[job_id] = batch_id
         for s in source_ids:
@@ -844,7 +1102,7 @@ def create_batch(body: CreateBatchIn):
         _sync_case(body.case_id)
     for s in source_ids:
         _SOURCE_POOL.submit(_run_source, batch_id, s)
-    return _ok({"batch_id": batch_id, "job_id": job_id, "status": "queued"})
+    return _ok({"batch_id": batch_id, "job_id": job_id, "status": "queued", "notices": dup_notices})
 
 
 def _start_missing_analyses(batch_ids: List[str]) -> None:
@@ -860,6 +1118,87 @@ def _start_missing_analyses(batch_ids: List[str]) -> None:
         _start_batch_analysis(bid)
 
 
+def _batch_summary_row(b: dict) -> dict:
+    """One row per batch for the list: no page or block detail (that is loaded when a batch is opened)."""
+    docs, scored, warn_count = [], [], 0
+    for sid in b["source_ids"]:
+        st = _SOURCES.get(sid, {})
+        pages = list((st.get("pages") or {}).values())
+        blocks = [x for p in pages for x in p.get("blocks", [])]
+        warn_count += len(st.get("warnings") or [])
+        unread = sum(1 for p in pages if p.get("status") in ("needs_ocr", "unreadable"))
+        docs.append({"source_id": sid, "filename": (_meta(sid) or {}).get("sanitized_filename", ""),
+                     "status": st.get("status", "queued"), "unread_pages": unread})
+        if blocks:
+            ps = _parse_score(blocks, pages, [], st.get("warnings") or [])
+            if ps["value"] is not None:
+                scored.append((ps["value"], len(blocks)))
+    exports = b.get("exports")
+    errors = b.get("export_errors") or []
+    export_status = ("none requested" if not b.get("output_formats") else "pending" if exports is None
+                     else "failed" if errors and not exports else "partial" if errors else "ready")
+    return {"batch_id": b["batch_id"], "created_at": b.get("created_at"), "status": b.get("status"), "stage": b.get("stage"),
+            "progress_percent": b.get("progress_percent", 0), "documents": docs, "document_count": len(docs),
+            "score": round(sum(v * n for v, n in scored) / sum(n for _, n in scored), 4) if scored else None,
+            "warnings_count": warn_count + len(b.get("notices") or []), "export_status": export_status,
+            "export_errors": errors, "analysis_status": (b.get("analysis") or {}).get("status", "not_run"),
+            "unread_pages": sum(d["unread_pages"] for d in docs), "archived": bool(b.get("archived"))}
+
+
+@router.get("/batches/summary")
+def list_batch_summaries(q: str = "", offset: int = 0, limit: int = 0, include_archived: bool = False):
+    """Paged, searchable batch rows (search matches batch id and file names)."""
+    try:
+        from backend import platform_api
+        default_limit = int((platform_api._file_settings().get("ui") or {}).get("batch_page_size", 10))
+    except Exception:
+        default_limit = 10
+    limit = limit or default_limit
+    with _LOCK:
+        ids = list(_BATCHES)
+    _start_missing_analyses(ids)
+    with _LOCK:
+        rows = [_batch_summary_row(b) for b in sorted(_BATCHES.values(), key=lambda b: b.get("created_ts", 0), reverse=True)
+                if (include_archived or not b.get("archived")) and not _source_list_access_error(b["source_ids"])]
+    needle = q.strip().casefold()
+    if needle:
+        rows = [r for r in rows if needle in r["batch_id"].casefold() or any(needle in d["filename"].casefold() for d in r["documents"])]
+    return _ok({"total": len(rows), "offset": offset, "limit": limit, "batches": rows[offset: offset + limit]})
+
+
+class ArchiveIn(BaseModel):
+    archived: bool = True
+
+
+@router.post("/batches/{batch_id}/archive")
+def archive_batch(batch_id: str, body: ArchiveIn):
+    with _LOCK:
+        b = _BATCHES.get(batch_id)
+        if not b:
+            return _err(404, "NOT_FOUND", "Batch not found")
+        b["archived"] = body.archived
+    _save_batch(batch_id)
+    return _ok({"batch_id": batch_id, "archived": body.archived})
+
+
+@router.delete("/batches/{batch_id}")
+def delete_batch(batch_id: str):
+    """Removes the batch record. Its documents stay available (other batches or cases may use them)."""
+    with _LOCK:
+        b = _BATCHES.get(batch_id)
+        if not b:
+            return _err(404, "NOT_FOUND", "Batch not found")
+        if b.get("status") in ("queued", "running") or (b.get("analysis") or {}).get("status") == "running":
+            return _err(409, "CONFLICT", "The batch is still running")
+        _BATCHES.pop(batch_id, None)
+        _JOBS.pop(b.get("job_id", ""), None)
+    try:
+        _store().delete(_P_BATCH, batch_id)
+    except Exception:
+        pass
+    return _ok({"batch_id": batch_id, "deleted": True})
+
+
 @router.get("/batches")
 def list_batches():
     with _LOCK:
@@ -867,7 +1206,8 @@ def list_batches():
     _start_missing_analyses(ids)
     with _LOCK:
         items = sorted(_BATCHES.values(), key=lambda b: b["created_ts"], reverse=True)
-        return _ok({"batches": [_batch_view(b) for b in items]})
+        visible = [b for b in items if not _source_list_access_error(b["source_ids"])]
+        return _ok({"batches": [_batch_view(b) for b in visible]})
 
 
 @router.get("/batches/{batch_id}")
@@ -877,6 +1217,9 @@ def get_batch(batch_id: str):
         b = _BATCHES.get(batch_id)
         if not b:
             return _err(404, "NOT_FOUND", "Batch not found")
+        denied = _source_list_access_error(b["source_ids"])
+        if denied:
+            return denied
         return _ok(_batch_view(b))
 
 
@@ -890,6 +1233,9 @@ def retry_source(batch_id: str, body: RetryIn):
             return _err(409, "CONFLICT", "Batch exports are still being generated")
         if body.source_id not in b["source_ids"]:
             return _err(400, "INVALID_INPUT", "Source is not part of this batch")
+        denied = _document_access_error(body.source_id)
+        if denied:
+            return denied
         if _SOURCES.get(body.source_id, {}).get("status") == "running":
             return _err(409, "CONFLICT", "Source is already running")
         _SOURCES[body.source_id] = {"status": "queued", "stage": "queued", "batch_id": batch_id}
@@ -911,6 +1257,9 @@ def get_job(job_id: str):
         b = _BATCHES.get(batch_id or "")
         if not b:
             return _err(404, "NOT_FOUND", "Job not found")
+        denied = _source_list_access_error(b["source_ids"])
+        if denied:
+            return denied
         data = {"job_id": job_id, "status": b["status"], "stage": b.get("stage"),
                 "progress_percent": b.get("progress_percent", 0)}
         if b["status"] in ("completed", "failed"):
@@ -925,7 +1274,8 @@ def _image_url(request: Request, source_id: str, n: int) -> str:
 
 def _page_view(request: Request, kind: str, page: dict) -> dict:
     out = dict(page)
-    out["image_url"] = _image_url(request, page["source_id"], page["page_number"]) if kind in PAGINATED_KINDS else ""
+    has_image = kind in PAGINATED_KINDS and (kind != "url" or page.get("image_available"))
+    out["image_url"] = _image_url(request, page["source_id"], page["page_number"]) if has_image else ""
     base = str(request.base_url).rstrip("/")
     out["blocks"] = [{**b, "crop_url": base + b["crop_url"]} if str(b.get("crop_url", "")).startswith("/") else b
                      for b in page.get("blocks", [])]
@@ -934,7 +1284,7 @@ def _page_view(request: Request, kind: str, page: dict) -> dict:
 
 def _source_view(request: Request, source_id: str, meta: dict, with_pages: bool) -> dict:
     support = _support()
-    kind = support.kind_of(meta.get("detected_mime", ""))
+    kind = "url" if meta.get("url_ingested") else support.kind_of(meta.get("detected_mime", ""))
     st = _SOURCES.get(source_id, {})
     pages = [_page_view(request, kind, p) for _, p in sorted((st.get("pages") or {}).items())]
     status = st.get("status") or meta.get("status")
@@ -948,13 +1298,17 @@ def _source_view(request: Request, source_id: str, meta: dict, with_pages: bool)
         "size_bytes": int(meta.get("size_bytes") or 0),
         "page_count": int(meta.get("page_count") or len(pages) or 0),
         "origin": {k: v for k, v in {"type": origin.get("type", "upload"), "url": origin.get("url"),
-                                      "parent_source_id": origin.get("parent_source_id")}.items() if v},
+                                      "parent_source_id": origin.get("parent_source_id"),
+                                      "links": origin.get("links")}.items() if v},
         "warnings": st.get("warnings") or [],
         "errors": [st["error"]] if st.get("error") else ([meta["error"]] if meta.get("error") else []),
     }
     all_blocks = [b for p in pages for b in p["blocks"]]
     if all_blocks:
-        doc["document_confidence"] = round(sum(b["confidence"] for b in all_blocks) / len(all_blocks), 4)
+        ps = _parse_score(all_blocks, pages, [], doc["warnings"])
+        doc["document_confidence"] = ps["value"]
+        doc["parse_score"] = ps
+    doc["unread_pages"] = [p["page_number"] for p in pages if p.get("status") in ("needs_ocr", "unreadable")]
     if with_pages:
         doc["pages"] = pages
     return doc
@@ -977,6 +1331,9 @@ def get_source(request: Request, source_id: str):
     meta = _meta(source_id)
     if not meta:
         return _err(404, "NOT_FOUND", "Source not found")
+    denied = _document_access_error(source_id)
+    if denied:
+        return denied
     return _ok(_source_view(request, source_id, meta, with_pages=True))
 
 
@@ -985,10 +1342,13 @@ def get_page(request: Request, source_id: str, page_number: int):
     meta = _meta(source_id)
     if not meta:
         return _err(404, "NOT_FOUND", "Source not found")
+    denied = _document_access_error(source_id)
+    if denied:
+        return denied
     page = (_SOURCES.get(source_id, {}).get("pages") or {}).get(page_number)
     if not page:
         return _err(404, "NOT_FOUND", "Page not processed")
-    kind = _support().kind_of(meta.get("detected_mime", ""))
+    kind = "url" if meta.get("url_ingested") else _support().kind_of(meta.get("detected_mime", ""))
     return _ok(_page_view(request, kind, page))
 
 
@@ -999,6 +1359,9 @@ def get_page_crop(source_id: str, page_number: int, bbox: str):
     meta = _meta(source_id)
     if not meta:
         return _err(404, "NOT_FOUND", "Source not found")
+    denied = _document_access_error(source_id)
+    if denied:
+        return denied
     try:
         x1, y1, x2, y2 = (float(v) for v in bbox.split(","))
     except ValueError:
@@ -1025,8 +1388,14 @@ def get_page_image(source_id: str, page_number: int):
     meta = _meta(source_id)
     if not meta:
         return _err(404, "NOT_FOUND", "Source not found")
-    if support.kind_of(meta.get("detected_mime", "")) not in PAGINATED_KINDS:
+    denied = _document_access_error(source_id)
+    if denied:
+        return denied
+    kind = "url" if meta.get("url_ingested") else support.kind_of(meta.get("detected_mime", ""))
+    if kind not in PAGINATED_KINDS:
         return _err(404, "NOT_FOUND", "This source has no page images")
+    if kind == "url" and not (_SOURCES.get(source_id, {}).get("pages", {}).get(page_number) or {}).get("image_available"):
+        return _err(404, "NOT_FOUND", "The website snapshot is unavailable for this source")
     try:
         png, _, _ = support.get_page_image(source_id, page_number, meta)
     except Exception as exc:
@@ -1045,7 +1414,8 @@ class CreateCaseIn(BaseModel):
 @router.get("/cases")
 def list_cases():
     with _LOCK:
-        return _ok({"cases": sorted(_CASES.values(), key=lambda c: c["created_at"], reverse=True)})
+        cases = [case for case in _CASES.values() if not _case_access_error(case)]
+        return _ok({"cases": sorted(cases, key=lambda c: c["created_at"], reverse=True)})
 
 
 @router.post("/cases")
@@ -1065,7 +1435,10 @@ def create_case(body: CreateCaseIn):
 def get_case(case_id: str):
     with _LOCK:
         case = _CASES.get(case_id)
-        return _ok(case) if case else _err(404, "NOT_FOUND", "Case not found")
+        if not case:
+            return _err(404, "NOT_FOUND", "Case not found")
+        denied = _case_access_error(case)
+        return denied or _ok(case)
 
 
 # ----------------------------------------------------------------------------------------------- actions
@@ -1151,25 +1524,32 @@ def _source_summary(source_id: str) -> dict:
     by_type: Dict[str, int] = {}
     by_method: Dict[str, int] = {}
     for b in blocks:
-        by_type[b["type"]] = by_type.get(b["type"], 0) + 1
-        by_method[b["extraction_method"]] = by_method.get(b["extraction_method"], 0) + 1
+        by_type[b.get("type", "text")] = by_type.get(b.get("type", "text"), 0) + 1
+        m = b.get("extraction_method", "unknown")
+        by_method[m] = by_method.get(m, 0) + 1
     agreements = [b["confidence_breakdown"]["ocr_agreement"] for b in blocks
                   if isinstance(b.get("confidence_breakdown"), dict) and "ocr_agreement" in b["confidence_breakdown"]]
     warnings = st.get("warnings") or []
     parse_score = _parse_score(blocks, pages, agreements, warnings)
-    # Native text that could not be cross-checked against OCR is unverified: it needs review.
-    unverified = 0
-    if parse_score["cap"]["applied"]:
-        unverified = sum(1 for b in blocks if not b.get("needs_review") and b.get("extraction_method") == "native_text"
-                         and "ocr_agreement" not in (b.get("confidence_breakdown") or {}))
+    # Text that was not cross-checked lowers the document score (cap) and adds one document warning; it is counted
+    # here for information but never turned into per-block review flags.
+    unverified = sum(1 for b in blocks if b.get("extraction_method") == "native_text"
+                     and "ocr_agreement" not in (b.get("confidence_breakdown") or {})) if parse_score["cap"]["applied"] else 0
+    statuses: Dict[str, int] = defaultdict(int)
+    for p in pages:
+        statuses[p.get("status") or "ok"] += 1
     return {
         "source_id": source_id, "filename": meta.get("sanitized_filename", ""), "status": st.get("status", "not_processed"),
         "route": st.get("route"), "pages": len(pages), "blocks": len(blocks), "blocks_by_type": by_type,
         "blocks_by_method": by_method, "tables": by_type.get("table", 0), "figures": by_type.get("figure", 0),
-        "document_confidence": round(sum(b["confidence"] for b in blocks) / len(blocks), 4) if blocks else None,
+        "document_confidence": (round(sum(b["confidence"] for b in blocks if b.get("confidence") is not None)
+                                      / max(1, sum(1 for b in blocks if b.get("confidence") is not None)), 4)
+                                if any(b.get("confidence") is not None for b in blocks) else None),
         "ocr_agreement_mean": round(sum(agreements) / len(agreements), 4) if agreements else None,
-        "needs_review": sum(1 for b in blocks if b.get("needs_review")) + unverified,
+        "needs_review": sum(1 for b in blocks if b.get("needs_review")),
         "unverified_blocks": unverified,
+        "unread_pages": statuses.get("needs_ocr", 0) + statuses.get("unreadable", 0),
+        "pages_by_status": dict(statuses),
         "reading_order_confidence": round(sum(p.get("reading_order_confidence", 0) for p in pages) / len(pages), 4) if pages else None,
         "parse_score": parse_score,
         "warnings": warnings, "warning_counts": _warning_counts(warnings), "error": st.get("error"),
@@ -1221,9 +1601,10 @@ def _warning_counts(warnings: List[dict]) -> List[dict]:
 def _parse_score(blocks: List[dict], pages: List[dict], agreements: List[float], warnings: List[dict]) -> dict:
     """Document parse score = mean block confidence, capped when a check could not run or the text layer is unusable.
     Caps come from platform_config.json "parse_score.caps" ({warning code: maximum score})."""
-    if not blocks:
+    confs = [b["confidence"] for b in blocks if b.get("confidence") is not None]
+    if not confs:
         return {"value": None, "components": {}, "cap": {"applied": False}, "formula": "mean block confidence"}
-    mean = sum(b["confidence"] for b in blocks) / len(blocks)
+    mean = sum(confs) / len(confs)
     components = {"mean_block_confidence": round(mean, 4)}
     if agreements:
         components["mean_ocr_agreement"] = round(sum(agreements) / len(agreements), 4)
@@ -1714,6 +2095,11 @@ def _explain(report: dict, sids: List[str], names: Dict[str, str], facts: List[d
 
 @router.get("/cases/{case_id}/reasoning-report")
 def get_reasoning_report(case_id: str):
+    case = _CASES.get(case_id)
+    if case:
+        denied = _case_access_error(case)
+        if denied:
+            return denied
     res = _store().get("pf_case_analysis", case_id)
     if not res or not res.get("report"):
         return _err(404, "NOT_FOUND", "This case has not been analysed yet")
@@ -1722,6 +2108,11 @@ def get_reasoning_report(case_id: str):
 
 @router.get("/cases/{case_id}/analysis")
 def get_case_analysis(case_id: str):
+    case = _CASES.get(case_id)
+    if case:
+        denied = _case_access_error(case)
+        if denied:
+            return denied
     res = _store().get("pf_case_analysis", case_id)
     return _ok(res) if res else _err(404, "NOT_FOUND", "This case has not been analysed yet")
 

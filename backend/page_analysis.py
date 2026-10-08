@@ -91,6 +91,8 @@ def agreement(native: str, ocr: str) -> float:
         return 1.0
     if not a or not b:
         return 0.0
+    if a.replace(" ", "") == b.replace(" ", ""):
+        return 1.0  # same characters, different spacing (OCR often merges "A B 4" into "AB4"): not a disagreement
     if len(a) <= 3:  # very short tokens ("0", "96"): exact token presence, a fuzzy ratio is meaningless here
         return 1.0 if a in b.split() or a == b else fuzz.ratio(a, b) / 100.0
     if len(b) > len(a) * 1.3:  # OCR line spans more than this block (e.g. several table cells on one line)

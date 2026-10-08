@@ -121,7 +121,37 @@ def _paddle_available() -> bool:
 
 
 def available_engines() -> Dict[str, bool]:
+    if os.getenv("PARSEFUSION_OCR_DISABLED", "").strip().lower() in ("1", "true", "yes"):
+        return {"tesseract": False, "paddleocr": False}  # explicit switch (tests, or to force text-layer-only runs)
     return {"tesseract": _tess_available(), "paddleocr": _paddle_available()}
+
+
+def engine_info() -> Dict[str, Any]:
+    """The engine run() would use by default, its version and languages, or why no engine is available."""
+    avail = available_engines()
+    configured = [e for e in (S("ocr.engines") or []) if e in avail]
+    chosen = next((e for e in configured if avail.get(e)), None)
+    info: Dict[str, Any] = {"available": bool(chosen), "engine": chosen, "version": None, "cmd": None,
+                            "languages": None, "configured_order": configured, "installed": avail, "reason": None}
+    if chosen == "tesseract":
+        import pytesseract
+        _locate_tesseract()
+        info["version"] = str(pytesseract.get_tesseract_version())
+        info["cmd"] = pytesseract.pytesseract.tesseract_cmd
+        try:
+            info["languages"] = sorted(pytesseract.get_languages(config=""))
+        except Exception:
+            pass
+    elif chosen == "paddle":
+        try:
+            import paddleocr
+            info["version"] = getattr(paddleocr, "__version__", None)
+        except Exception:
+            pass
+    if not chosen:
+        info["reason"] = ("OCR is switched off (PARSEFUSION_OCR_DISABLED)" if os.getenv("PARSEFUSION_OCR_DISABLED") else None) or ("Tesseract was not found (install it, e.g. C:\\Program Files\\Tesseract-OCR, or set TESSERACT_CMD) "
+                          "and PaddleOCR is not installed")
+    return info
 
 
 def _tess_langs(requested: str, warnings: List[WarningItem]) -> str:

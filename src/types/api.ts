@@ -81,6 +81,7 @@ export interface AppConfig {
   confidence_bands: ConfidenceBand[];
   severity_levels: SeverityLevel[];
   feature_flags: Record<string, boolean>;
+  ui?: { batch_page_size?: number; block_render_chunk?: number; shred_max_chars?: number; shred_min_run?: number };
   pipeline_stages: PipelineStage[];
 }
 
@@ -89,6 +90,7 @@ export interface UserProfile {
   display_name: string;
   role: string;
   capabilities: string[];
+  demo_role_switch_enabled?: boolean;
   tenant_id?: string;
 }
 
@@ -122,6 +124,25 @@ export interface BatchSummary {
   sources?: BatchSourceState[];
   /** Cross-document reasoning over the batch's documents, run automatically once parsing finishes. */
   analysis?: BatchAnalysisState;
+  notices?: { code: string; message: string; source_id?: ID; batch_id?: ID }[];
+  archived?: boolean;
+}
+
+export interface BatchSummaryRow {
+  batch_id: ID;
+  created_at: ISODate;
+  status: string;
+  stage?: string;
+  progress_percent?: number;
+  documents: { source_id: ID; filename: string; status: string; unread_pages: number }[];
+  document_count: number;
+  score: number | null;
+  warnings_count: number;
+  export_status: string;
+  export_errors: { format: string; code: string; message: string; reason?: string }[];
+  analysis_status: string;
+  unread_pages: number;
+  archived: boolean;
 }
 
 export interface BatchAnalysisState {

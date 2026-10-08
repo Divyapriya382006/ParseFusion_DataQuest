@@ -1,6 +1,6 @@
 # ParseFusion Agent Backend Contract
 
-This document specifies the exact request and response schemas for all 24 backend agents in ParseFusion.
+This document specifies the exact request and response schemas for the backend agents in ParseFusion.
 All endpoints use the standard JSON envelope unless binary upload/download is specified:
 
 **Success Envelope:**
@@ -445,22 +445,34 @@ All endpoints use the standard JSON envelope unless binary upload/download is sp
     "status": "allowed",
     "robots_checked": true,
     "source_id": "src_web_1",
+    "links": [
+      {"text": "Annual report", "url": "https://example.com/annual-report"}
+    ],
     "snapshot": {
       "screenshot_url": "/api/snapshots/snap_1.png",
       "fetched_at": "2026-10-07T02:00:00Z"
     }
   }
   ```
+- The guarded browser extracts visible DOM text and bounded HTTP(S) links. Link query strings and fragments are removed; destinations are listed but are not crawled automatically.
+- The rendered page is registered as a parsed source and can be added to a batch or case. Its text blocks and optional screenshot are available through the standard `/sources/{source_id}` page APIs.
 
 ### 23. Governed Access Control & Column-Level Security
 - **Endpoints:**
+  - `GET /auth/me`: Includes the current demo role and capabilities.
+  - `POST /auth/demo-role`: Local-demo-only role switch (`{"role": "viewer"}` or `{"role": "admin"}`). This changes the identity for the backend process; do not expose in a deployment with real users.
+  - `GET /agents/access/documents`: List accepted local documents and their visibility (`private` by default; metadata only).
+  - `POST /agents/access/document-visibility`: Admin sets `{"source_id": "src_1", "visibility": "public"}` or `"private"`. Public makes the document available to all viewers in the same tenant; private requires an individual approved grant.
+  - `POST /agents/access/document-request`: Viewer request (`{"source_id": "src_1", "reason": "Review this report"}`).
+  - `GET /agents/access/document-requests`: Admin sees tenant requests; a viewer sees only their own requests.
+  - `POST /agents/access/document-decision`: Admin decision (`{"request_id": "req_1", "decision": "approve"}` or `"reject"`).
   - `GET /agents/access/schema`: Returns table catalog with column masking/lock flags.
   - `GET /agents/access/preview?resource_id=tbl_1&limit=25`: Returns schema preview (locked columns arrive as null).
   - `POST /agents/access/request`: Elevation request (`{"resource_id": "tbl_1", "columns": ["ssn"], "reason": "Audit 2026"}`).
   - `GET /agents/access/requests`: List pending requests for administrator review.
   - `POST /agents/access/decision`: Approve or reject (`{"request_id": "req_1", "decision": "approve"}`).
 
-### 24. Governed NL Chat SQL
+### 24. Legacy Governed NL Chat SQL
 - **Endpoint:** `POST /agents/chat-sql`
 - **Request:** `{"question": "What is the discrepancy in total revenue for case 1?", "scope": {"case_id": "case_1"}}`
 - **Response Data:**

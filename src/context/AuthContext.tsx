@@ -1,6 +1,6 @@
 import React, { createContext, useContext } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { fetchCurrentUser, AUTH_ME_ENDPOINT } from "../api/auth";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { fetchCurrentUser, switchDemoRole as switchRoleRequest, AUTH_ME_ENDPOINT } from "../api/auth";
 import { NotConnectedError } from "../api/errors";
 import { hasCapability as checkCapability } from "../config/capabilityKeys";
 import type { UserProfile } from "../types/api";
@@ -14,6 +14,7 @@ interface AuthContextType {
   notConnectedEndpoint?: string;
   hasCapability: (requiredKey: string) => boolean;
   refetch: () => void;
+  switchDemoRole: (role: "admin" | "viewer") => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType>({
@@ -24,9 +25,11 @@ const AuthContext = createContext<AuthContextType>({
   isNotConnected: false,
   hasCapability: () => false,
   refetch: () => {},
+  switchDemoRole: async () => {},
 });
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const queryClient = useQueryClient();
   const { data: user, isLoading, isError, error, refetch } = useQuery<UserProfile>({
     queryKey: ["currentUser"],
     queryFn: ({ signal }) => fetchCurrentUser(signal),
@@ -45,6 +48,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return checkCapability(user?.capabilities, requiredKey);
   };
 
+  const switchDemoRole = async (role: "admin" | "viewer") => {
+    const updatedUser = await switchRoleRequest(role);
+    await queryClient.cancelQueries();
+    queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== "currentUser" });
+    queryClient.setQueryData(["currentUser"], updatedUser);
+    await queryClient.invalidateQueries({ predicate: (query) => query.queryKey[0] !== "currentUser" });
+  };
+
   return (
     <AuthContext.Provider
       value={{
@@ -56,6 +67,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         notConnectedEndpoint,
         hasCapability,
         refetch,
+        switchDemoRole,
       }}
     >
       {children}

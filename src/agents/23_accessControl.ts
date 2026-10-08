@@ -19,6 +19,11 @@ export const ENDPOINT_PREVIEW = "/agents/access/preview";
 export const ENDPOINT_REQUEST = "/agents/access/request";
 export const ENDPOINT_REQUESTS = "/agents/access/requests";
 export const ENDPOINT_DECISION = "/agents/access/decision";
+export const ENDPOINT_DOCUMENTS = "/agents/access/documents";
+export const ENDPOINT_DOCUMENT_REQUEST = "/agents/access/document-request";
+export const ENDPOINT_DOCUMENT_REQUESTS = "/agents/access/document-requests";
+export const ENDPOINT_DOCUMENT_DECISION = "/agents/access/document-decision";
+export const ENDPOINT_DOCUMENT_VISIBILITY = "/agents/access/document-visibility";
 
 // Standard ENDPOINT constant pointing to primary resource schema
 export const ENDPOINT = ENDPOINT_SCHEMA;
@@ -94,6 +99,55 @@ export interface AccessDecisionOutput {
   request_id: ID;
   status: string;
   signature?: string;
+}
+
+export interface DocumentAccessItem {
+  source_id: ID;
+  filename: string;
+  kind: string;
+  created_at?: string;
+  visibility: "public" | "private";
+  has_access: boolean;
+}
+
+export interface DocumentAccessRequest {
+  request_id: ID;
+  user_id: string;
+  source_id: ID;
+  filename: string;
+  reason: string;
+  status: "pending" | "approved" | "rejected";
+  created_at: ISODate;
+  decided_by?: string;
+  decided_at?: ISODate;
+  notes?: string;
+}
+
+export async function fetchAccessDocuments(signal?: AbortSignal): Promise<{ documents: DocumentAccessItem[] }> {
+  return apiClient(ENDPOINT_DOCUMENTS, { signal });
+}
+
+export async function requestDocumentAccess(input: { source_id: ID; reason: string }, signal?: AbortSignal) {
+  return apiClient<DocumentAccessRequest>(ENDPOINT_DOCUMENT_REQUEST, { method: "POST", body: input, signal });
+}
+
+export async function fetchDocumentAccessRequests(signal?: AbortSignal): Promise<{ requests: DocumentAccessRequest[] }> {
+  return apiClient(ENDPOINT_DOCUMENT_REQUESTS, { signal });
+}
+
+export async function decideDocumentAccess(input: {
+  request_id: ID;
+  decision: "approve" | "reject";
+  notes?: string;
+}, signal?: AbortSignal) {
+  return apiClient<DocumentAccessRequest>(ENDPOINT_DOCUMENT_DECISION, { method: "POST", body: input, signal });
+}
+
+export async function setDocumentVisibility(
+  input: { source_id: ID; visibility: "public" | "private" },
+  signal?: AbortSignal,
+): Promise<{ source_id: ID; visibility: "public" | "private" }> {
+  return apiClient(ENDPOINT_DOCUMENT_VISIBILITY, { method: "POST", body: input, signal });
 }
 
 export async function fetchAccessSchema(signal?: AbortSignal): Promise<AccessSchemaOutput> {

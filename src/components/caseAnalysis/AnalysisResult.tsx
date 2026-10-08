@@ -830,6 +830,10 @@ export const AnalysisResult: React.FC<{
   const excluded = analysis.stages.find((s) => s.stage === "parsing") as { excluded_sources?: { source_id: string; filename: string; reason: string }[] } | undefined;
   const reasoning = stageOutput<ReasoningOut>(analysis, "cross_document_reasoning");
   const facts = factsOut?.facts ?? [];
+  const previewEvidence =
+    facts.find((fact) => fact.evidence.length > 0)?.evidence ??
+    reasoning?.findings.find((finding) => finding.evidence_references.length > 0)?.evidence_references ??
+    [];
   const factsById = useMemo(() => new Map(facts.map((f) => [f.fact_id, f])), [facts]);
   const stageStatus = (name: string) => analysis.stages.find((s) => s.stage === name);
   const rep = analysis.report;
@@ -955,8 +959,8 @@ export const AnalysisResult: React.FC<{
         </div>
         <aside className="space-y-2">
           <h3 className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">Evidence on the page</h3>
-          <p className="text-[10px] text-neutral-500">Hover a fact, comparison or finding to see where it comes from.</p>
-          <HighlightedPagesPreview />
+          <p className="text-[10px] text-neutral-500">Showing the first available evidence. Hover or focus a fact, comparison or finding to preview its source instead.</p>
+          <HighlightedPagesPreview fallbackEvidence={previewEvidence} />
         </aside>
       </div>
     </div>

@@ -56,4 +56,13 @@ describe("Case Review highlight", () => {
     expect(screen.getByTestId("highlighted-pages-empty")).toBeInTheDocument();
     expect(getSourcePage).not.toHaveBeenCalled();
   });
+
+  it("shows the first available evidence page before the user hovers a fact", async () => {
+    renderWithApp(
+      <HighlightedPagesPreview fallbackEvidence={[makeEvidence({ source_id: "src_1", filename: "invoice.pdf" })]} />
+    );
+    await waitFor(() => expect(screen.getAllByTestId("highlight-box")).toHaveLength(1));
+    expect(screen.getAllByText("invoice.pdf").length).toBeGreaterThan(0);
+    expect(screen.queryByTestId("highlighted-pages-empty")).not.toBeInTheDocument();
+  });
 });

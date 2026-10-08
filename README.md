@@ -79,6 +79,21 @@ Open <http://localhost:3000>.
 
 `.env.local` only needs to be created once. If the frontend shows **"Backend not connected"**, the backend is not running or `VITE_API_BASE_URL` is wrong — the frontend never shows invented data in place of a backend response.
 
+### Local demo roles and document requests
+
+The local demo backend supports `admin` and `viewer` identities. The top-right identity menu can switch roles without restarting the backend and provides viewers a direct link to **Request document access**. This switch changes the identity for the entire backend instance, so it is for a single-user local demo only.
+
+Alternatively, set these variables before starting the backend:
+
+```cmd
+set PARSEFUSION_DEMO_ROLE=viewer
+set PARSEFUSION_DEMO_USER_ID=reader-1
+```
+
+Omit `PARSEFUSION_DEMO_ROLE` to use the default `admin` identity (`system`). Viewer requests are stored in the local ParseFusion store. Admins can approve or reject them from **Access Control → Documents & Requests**; an approval grants that viewer access to the document, and rejection leaves it locked. Request and decision notifications are sent to the configured `NTFY_TOPIC_ADMIN` topic, so the viewer must subscribe to that same ntfy topic to receive decision notifications.
+
+This is a local-development role switch, not a login system: one running backend instance represents one identity at a time. Restart it with the other role to alternate between submitting a viewer request and reviewing it as admin. Do not expose this demo auth configuration to an untrusted network; production deployments must provide authenticated users and role assignment through a real identity provider.
+
 ---
 
 ## 3. How it works: the pipeline
@@ -241,7 +256,6 @@ Thumbnails are cropped client-side from the page image with CSS background posit
 | **Case Analysis** | `/case-analysis` | Runs and shows every stage: parsing per document → facts → comparisons / not comparable / findings → final verdict and confidence. |
 | Action Review | `/actions` | Drafted follow-up actions and human approval. |
 | Access Control | `/access` | Schema browser, column masking, access requests. |
-| Governed Chat SQL | `/chat` | Natural-language questions answered with governed SQL and cited rows. |
 | Exports | `/exports` | Create and download signed exports. |
 | Audit Log | `/audit` | Append-only, hash-chained event log. |
 | Metrics | `/metrics` | Sources/pages processed, throughput, mean confidence, blocks needing review. |
@@ -278,7 +292,7 @@ Thumbnails are cropped client-side from the page image with CSS background posit
 | 21 | Extractor consensus | ⚙️ ❌ | OCR-vs-native agreement in `page_analysis.py` |
 | 22 | URL guard / web ingest | ❌ | code sits in `src/agents/18_humanApproval.py` |
 | 23 | Access control | ✅ | |
-| 24 | Chat SQL | ✅ | |
+| 24 | Governed NL Chat SQL API | ✅ | API endpoint; no chat UI |
 
 `GET /health` (backend) and the Agent Status page show the live state.
 
@@ -359,6 +373,11 @@ Limits (file size, page count) and accepted types are reported by `GET /config` 
 |---|---|---|
 | `VITE_API_BASE_URL` | `.env.local` | backend URL for the frontend |
 | `CORS_ORIGINS` | backend | allowed origins (default `http://localhost:3000,http://127.0.0.1:3000`) |
+| `E_DATA_DB_URL` | backend | read-only SQLAlchemy URL for the governed catalog used by Access Control and the legacy Agent 24 SQL endpoint (for example `sqlite:///./catalog.db`) |
+| `NTFY_ENABLED` | backend | Enable ntfy notifications (`1` by default) |
+| `NTFY_BASE_URL` / `NTFY_TOPIC_ADMIN` | backend | ntfy server and topic; defaults to `https://ntfy.sh/dataquest` |
+| `NTFY_TOKEN` | backend | Optional ntfy bearer token for private topics |
+| `APP_BASE_URL` | backend | Optional UI origin used to make notification links clickable (for example `http://localhost:3000`) |
 | `TESSERACT_CMD` | backend | path to `tesseract.exe` if not in the default folder |
 | `PARSEFUSION_DATA_DIR` | backend | data folder (default `<project>/.pf_data`) |
 | `PARSEFUSION_STORE` | backend | `sqlite` (default) or `memory` |

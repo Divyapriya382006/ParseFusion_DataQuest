@@ -506,10 +506,17 @@ EVENTS: dict = {
     "audit_checkpoint_failed": ("high", ["warning"], "Audit checkpoint could not be anchored", False),
     # agent 20
     "export_sensitive": ("high", ["outbox_tray", "warning"], "Unmasked or sensitive export", True),
+    "export_history_viewed": ("normal", ["outbox_tray"], "Export history viewed", False),
     # agent 23
     "access_requested": ("high", ["raised_hand"], "New data access request", True),
     "access_approved": ("normal", ["unlock"], "Access request approved", True),
     "access_rejected": ("normal", ["lock"], "Access request rejected", True),
+    "access_requests_viewed": ("normal", ["eyes"], "Access requests viewed", False),
+    "access_denied": ("high", ["warning"], "Access request action denied", False),
+    "document_access_requested": ("high", ["file", "raised_hand"], "Document access requested", False),
+    "document_access_approved": ("normal", ["file", "white_check_mark"], "Document access approved", False),
+    "document_access_rejected": ("normal", ["file", "no_entry_sign"], "Document access rejected", False),
+    "document_visibility_changed": ("high", ["file", "lock"], "Document visibility changed", False),
     "grant_expired": ("normal", ["hourglass"], "Access grant expired", False),
     # agent 24
     "chat_confirm_pending": ("high", ["hourglass_flowing_sand"], "Chat query waiting for approval", True),
@@ -705,7 +712,7 @@ AGENT_MODULES = ["19_audit", "18_human_approval", "20_export", "23_access_contro
 
 
 def register_all(app) -> None:
-    """register_all(app): mounts the 5 routers, the audit middleware, and the background workers."""
+    """register_all(app): mounts the routers, the audit middleware, and the background workers."""
     for name in AGENT_MODULES:
         m = import_agent(name)
         app.include_router(m.router)

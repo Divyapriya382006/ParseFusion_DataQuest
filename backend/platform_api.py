@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
 
 router = APIRouter()
@@ -105,6 +105,7 @@ def get_config():
         "confidence_bands": settings.get("confidence_bands") or [],
         "severity_levels": settings.get("severity_levels") or [],
         "feature_flags": settings.get("feature_flags") or {},
+        "ui": settings.get("ui") or {},
         "pipeline_stages": [{"id": n, "label": f"{n[:2]} {_label(n[3:])}"} for n in AGENT_STATUS["mounted"]],
     }
     if settings.get("realtime_url"):
@@ -126,10 +127,30 @@ def auth_me():
         "display_name": str(user.get("display_name") or user.get("name") or user["user_id"]),
         "role": str(user.get("role") or ""),
         "capabilities": [str(c) for c in (user.get("capabilities") or [])],
+        "demo_role_switch_enabled": True,
     }
     if user.get("tenant_id"):
         profile["tenant_id"] = str(user["tenant_id"])
     return _envelope(profile)
+
+
+@router.post("/auth/demo-role")
+def switch_demo_role(body: dict = Body(...)):
+    role = body.get("role")
+    if role not in ("admin", "viewer"):
+        return _error(400, "INVALID_INPUT", "role must be admin or viewer")
+    try:
+        from backend.common import auth
+        user = auth.switch_demo_role(role)
+    except Exception as exc:
+        return _error(500, "ROLE_SWITCH_FAILED", f"Could not switch demo role: {exc}")
+    return _envelope({
+        "user_id": str(user["user_id"]),
+        "display_name": str(user.get("display_name") or user.get("name") or user["user_id"]),
+        "role": str(user["role"]),
+        "capabilities": [str(c) for c in user.get("capabilities") or []],
+        "demo_role_switch_enabled": True,
+    })
 
 
 @router.get("/health/agents")
@@ -139,4 +160,16 @@ def health_agents():
         {"id": n, "name": f"{n[:2]}. {_label(n[3:])}", "status": "offline", "reason": reason}
         for n, reason in sorted(AGENT_STATUS["failed"].items())
     ]
-    return _envelope({"agents": agents})
+    try:
+        from backend import pipeline_api
+        ocr = {k: v for k, v in pipeline_api.ocr_info().items() if not k.startswith("_")}
+    except Exception as exc:  # pragma: no cover
+        ocr = {"available": False, "reason": str(exc)}
+    for a in agents:
+        if a["id"].startswith("04_"):
+            a["engine"] = ocr.get("engine")
+            a["engine_version"] = ocr.get("version")
+            if not ocr.get("available"):
+                a["status"] = "degraded"
+                a["reason"] = ocr.get("reason")
+    return _envelope({"agents": agents, "ocr": ocr})

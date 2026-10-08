@@ -8,6 +8,7 @@ export const CAPABILITY_KEYS = {
   BATCH_VIEW: "batch:view",
   DASHBOARD_VIEW: "dashboard:view",
   SOURCE_VIEW: "documents:view",
+  DOCUMENT_REQUEST: "documents:request",
   CASE_REVIEW: "cases:review",
   CASE_DECISION: "cases:decide",
   ACTION_DRAFT: "actions:draft",

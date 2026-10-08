@@ -1,0 +1,9 @@
+.pf_data
+.venv
+node_modules
+dist
+.git
+**/__pycache__
+*.db
+*.db-wal
+*.db-shm

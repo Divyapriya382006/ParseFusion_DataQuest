@@ -1,19 +1,14 @@
 import React from "react";
 import { NavLink } from "react-router-dom";
 import {
-  GitCompareArrows,
   Upload,
   Layers,
   LayoutDashboard,
   FolderGit2,
   FileCheck,
   ShieldCheck,
-  MessageSquareCode,
   Download,
   ScrollText,
-  BarChart3,
-  Activity,
-  Settings,
 } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
 import { CAPABILITY_KEYS } from "../../config/capabilityKeys";
@@ -23,6 +18,7 @@ interface NavItemDef {
   path: string;
   icon: React.ElementType;
   capability?: string;
+  capabilitiesAny?: string[];
   alwaysShow?: boolean;
 }
 
@@ -34,10 +30,10 @@ const NAV_ITEMS: NavItemDef[] = [
     capability: CAPABILITY_KEYS.UPLOAD,
   },
   {
-    label: "Batch Pipeline",
+    label: "Batch & Case Analysis",
     path: "/batch",
     icon: Layers,
-    capability: CAPABILITY_KEYS.BATCH_VIEW,
+    capabilitiesAny: [CAPABILITY_KEYS.BATCH_VIEW, CAPABILITY_KEYS.CASE_REVIEW],
   },
   {
     label: "Results Dashboard",
@@ -49,12 +45,6 @@ const NAV_ITEMS: NavItemDef[] = [
     label: "Case Review",
     path: "/cases",
     icon: FolderGit2,
-    capability: CAPABILITY_KEYS.CASE_REVIEW,
-  },
-  {
-    label: "Case Analysis",
-    path: "/case-analysis",
-    icon: GitCompareArrows,
     capability: CAPABILITY_KEYS.CASE_REVIEW,
   },
   {
@@ -70,12 +60,6 @@ const NAV_ITEMS: NavItemDef[] = [
     capability: CAPABILITY_KEYS.ACCESS_BROWSE,
   },
   {
-    label: "Governed Chat SQL",
-    path: "/chat",
-    icon: MessageSquareCode,
-    capability: CAPABILITY_KEYS.CHAT_SQL,
-  },
-  {
     label: "Exports",
     path: "/exports",
     icon: Download,
@@ -86,24 +70,6 @@ const NAV_ITEMS: NavItemDef[] = [
     path: "/audit",
     icon: ScrollText,
     capability: CAPABILITY_KEYS.AUDIT_VIEW,
-  },
-  {
-    label: "Quality & Metrics",
-    path: "/metrics",
-    icon: BarChart3,
-    capability: CAPABILITY_KEYS.METRICS_VIEW,
-  },
-  {
-    label: "Agent Status",
-    path: "/agent-status",
-    icon: Activity,
-    alwaysShow: true, // Always accessible for system connection & contract verification
-  },
-  {
-    label: "Settings",
-    path: "/settings",
-    icon: Settings,
-    alwaysShow: true,
   },
 ];
 
@@ -116,6 +82,8 @@ export const Sidebar: React.FC = () => {
     // If backend is not connected yet, show all items so operator can inspect every page
     // and see the specific "Backend not connected: <endpoint>" state for that page!
     if (isNotConnected || !user) return true;
+    if (!item.capability) return true;
+    if (item.capabilitiesAny) return item.capabilitiesAny.some(hasCapability);
     if (!item.capability) return true;
     return hasCapability(item.capability);
   });

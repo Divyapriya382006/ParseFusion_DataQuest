@@ -17,7 +17,6 @@ import { ResultsDashboardPage } from "./pages/ResultsDashboardPage";
 import { CaseReviewPage } from "./pages/CaseReviewPage";
 import { ActionsPage } from "./pages/ActionsPage";
 import { AccessControlPage } from "./pages/AccessControlPage";
-import { ChatPage } from "./pages/ChatPage";
 import { ExportsPage } from "./pages/ExportsPage";
 import { AuditLogPage } from "./pages/AuditLogPage";
 import { MetricsPage } from "./pages/MetricsPage";
@@ -59,7 +58,6 @@ export default function App() {
                         <Route path="/cases" element={<CaseReviewPage />} />
                         <Route path="/actions" element={<ActionsPage />} />
                         <Route path="/access" element={<AccessControlPage />} />
-                        <Route path="/chat" element={<ChatPage />} />
                         <Route path="/exports" element={<ExportsPage />} />
                         <Route path="/audit" element={<AuditLogPage />} />
                         <Route path="/metrics" element={<MetricsPage />} />

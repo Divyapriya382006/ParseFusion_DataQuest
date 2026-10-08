@@ -20,10 +20,11 @@ export interface UrlIngestInput {
 }
 
 export interface UrlIngestOutput {
-  status: "allowed" | "blocked";
+  status: "allowed" | "blocked" | "failed";
   reason?: string;
   robots_checked: boolean;
   source_id?: ID;
+  links?: Array<{ text: string; url: string }>;
   snapshot?: {
     screenshot_url: string;
     fetched_at: ISODate;

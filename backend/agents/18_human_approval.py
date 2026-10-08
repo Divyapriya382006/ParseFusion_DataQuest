@@ -89,9 +89,9 @@ def _record_event(action_id: str, tenant_id: str, event_type: str, actor_id: str
         ))
 
 
-def _notify(event_type: str, action_id: str, user: dict) -> None:
+def _notify(event_type: str, action_id: str, user: dict, link: str) -> None:
     ec.notify_send(event_type, message=f"Action {action_id} changed by {user['user_id']}.",
-                   dedupe_key=f"{event_type}:{action_id}")
+                   link=link, dedupe_key=f"{event_type}:{action_id}")
 
 
 def _transition(action: dict, user: dict, decision: str, inp: ApprovalIn) -> dict:
@@ -251,11 +251,14 @@ def _transition(action: dict, user: dict, decision: str, inp: ApprovalIn) -> dic
         })
     _record_event(action_id, tenant_id, event_type, str(user["user_id"]), event_details)
     notify_events = {
-        "submit": "action_submitted", "approve": "action_approved",
-        "reject": "action_rejected", "execute": "action_executed",
+        "submit": ("action_submitted", "/actions"),
+        "approve": ("action_approved", "/actions"),
+        "reject": ("action_rejected", "/actions"),
+        "execute": ("action_executed", "/actions"),
     }
     if decision in notify_events:
-        _notify(notify_events[decision], action_id, user)
+        notification_type, link = notify_events[decision]
+        _notify(notification_type, action_id, user, link)
     event_out = {"event_type": event_type, **event_details}
     if decision == "approve":
         event_out["content_hash"] = digest

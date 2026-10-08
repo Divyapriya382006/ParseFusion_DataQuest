@@ -1,17 +1,19 @@
 import React from "react";
-import { ServerOff, RefreshCw, Terminal, ExternalLink } from "lucide-react";
+import { ServerOff, RefreshCw, Terminal } from "lucide-react";
 import { getApiBaseUrl } from "../../api/client";
 
 interface BackendNotConnectedProps {
   endpoint: string;
   onRetry?: () => void;
   message?: string;
+  detail?: string;
 }
 
 export const BackendNotConnected: React.FC<BackendNotConnectedProps> = ({
   endpoint,
   onRetry,
   message,
+  detail,
 }) => {
   const currentBaseUrl = getApiBaseUrl();
 
@@ -28,6 +30,11 @@ export const BackendNotConnected: React.FC<BackendNotConnectedProps> = ({
       <p className="text-sm text-neutral-400 max-w-md mb-4">
         {message || "The application is awaiting communication with this agent endpoint."}
       </p>
+      {detail && (
+        <p className="text-xs text-amber-300 max-w-lg mb-4" role="status">
+          {detail}
+        </p>
+      )}
 
       <div className="w-full max-w-lg bg-neutral-950 border border-neutral-800 rounded-lg p-3 text-left mb-6 font-mono text-xs text-neutral-300">
         <div className="flex items-center gap-2 text-neutral-500 mb-2 font-sans text-xs">
@@ -52,13 +59,6 @@ export const BackendNotConnected: React.FC<BackendNotConnectedProps> = ({
             Retry Connection
           </button>
         )}
-        <a
-          href="/agent-status"
-          className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-neutral-300 hover:text-white bg-transparent border border-neutral-800 hover:border-neutral-700 rounded-lg transition-colors"
-        >
-          Check Agent Health
-          <ExternalLink className="w-3 h-3" />
-        </a>
       </div>
     </div>
   );

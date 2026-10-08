@@ -146,9 +146,13 @@ export interface PageUnit {
   rotation: number;
   layout_class: string;
   reading_order_confidence: number;
-  coverage_score?: number;
+  coverage_score?: number | null;
   image_url: string;
   uncovered_regions?: BoundingBox[];
+  /** ok | partial | needs_ocr | unreadable | blank (a page with ink and no blocks is never "ok"). */
+  status?: string;
+  page_score?: { value: number | null; components: Record<string, number | null>; formula?: string; cap_reason?: string };
+  rejected_tables?: { bbox: number[]; reason: string }[];
   blocks: Block[];
 }
 
@@ -221,4 +225,4 @@ export interface ProposedAction {
   idempotency_key: string;
   final_content_hash?: string;
   labels: string[];
-}
+}

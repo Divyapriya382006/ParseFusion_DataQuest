@@ -1,9 +1,10 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Crosshair } from "lucide-react";
 import { getSourcePage } from "../../api/sources";
 import { useEvidenceHighlight } from "../../context/EvidenceHighlightContext";
-import type { HighlightBox } from "../../lib/evidence";
+import { toHighlightBoxes, type HighlightBox } from "../../lib/evidence";
+import type { EvidenceReference } from "../../types/canonical";
 import { PageHighlightView } from "./PageHighlightView";
 
 interface PageGroup {
@@ -55,30 +56,30 @@ const PagePreview: React.FC<{ group: PageGroup; boxes: HighlightBox[] }> = ({ gr
  * drawn at once and labelled by its document. The last hovered pages stay visible (without boxes) so the pane
  * does not jump when the pointer moves away.
  */
-export const HighlightedPagesPreview: React.FC = () => {
+export const HighlightedPagesPreview: React.FC<{ fallbackEvidence?: readonly EvidenceReference[] }> = ({ fallbackEvidence = [] }) => {
   const { boxes } = useEvidenceHighlight();
-  const [groups, setGroups] = useState<PageGroup[]>([]);
+  const fallbackBoxes = useMemo(() => toHighlightBoxes(fallbackEvidence), [fallbackEvidence]);
+  const visibleBoxes = boxes.length > 0 ? boxes : fallbackBoxes;
 
-  useEffect(() => {
-    if (boxes.length === 0) return;
+  const groups = useMemo(() => {
     const seen = new Map<string, PageGroup>();
-    for (const b of boxes) {
+    for (const b of visibleBoxes) {
       const key = groupKey(b);
       if (!seen.has(key)) {
         seen.set(key, { key, source_id: b.source_id, page_number: b.page_number, label: b.label ?? b.source_id });
       }
     }
-    setGroups(Array.from(seen.values()));
-  }, [boxes]);
+    return Array.from(seen.values());
+  }, [visibleBoxes]);
 
   const boxesByGroup = useMemo(() => {
     const map = new Map<string, HighlightBox[]>();
-    for (const b of boxes) {
+    for (const b of visibleBoxes) {
       const key = groupKey(b);
       map.set(key, [...(map.get(key) ?? []), b]);
     }
     return map;
-  }, [boxes]);
+  }, [visibleBoxes]);
 
   if (groups.length === 0) {
     return (
@@ -87,7 +88,7 @@ export const HighlightedPagesPreview: React.FC = () => {
         className="flex items-center gap-2 rounded-xl border border-dashed border-neutral-800 p-4 text-[11px] text-neutral-500"
       >
         <Crosshair className="h-3.5 w-3.5 shrink-0" />
-        <span>Hover or focus a fact or finding to see where its evidence sits on the source pages.</span>
+        <span>No source-page evidence is available in this analysis.</span>
       </div>
     );
   }

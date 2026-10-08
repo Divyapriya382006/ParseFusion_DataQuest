@@ -14,7 +14,7 @@ export const UrlGuardWebRenderAgent = null;
 export const AccessControlAgent = null;
 export const ChatSqlAgent = null;
 
-// Direct list of all 24 agent definitions for health & contract checks
+// Direct list of all agent definitions for health & contract checks
 export const ALL_AGENTS = [
   { id: "01_file_validation", name: "01. File Validation", endpoint: "/agents/file-validation", method: "POST" },
   { id: "02_format_router", name: "02. Format Router", endpoint: "/agents/format-router", method: "POST" },

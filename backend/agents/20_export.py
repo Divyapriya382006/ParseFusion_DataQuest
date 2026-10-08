@@ -277,10 +277,24 @@ def _r_pdf(doc: dict, opts: dict) -> bytes:
             story.append(Paragraph(f"<b>{cl(k)}</b>: {cl(v)}", st["BodyText"]))
         for t in it["tables"]:
             story += [Spacer(1, 6), Paragraph(xesc(t["name"]), st["Heading3"])]
-            data = [[Paragraph(cl(c), st["BodyText"]) for c in t["columns"]]] + [[Paragraph(cl(c), st["BodyText"]) for c in r] for r in t["rows"]]
-            tb = RLTable(data, repeatRows=1)
-            tb.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.4, colors.grey), ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey)]))
-            story.append(tb)
+            # Explicit column widths. Auto-sized Paragraph columns in a wide table can come out narrower than the cell
+            # padding, which makes ReportLab raise "flowable given negative availWidth" (the old "Processing failed").
+            # Wide tables are split into column chunks that each fit the page.
+            min_w = float(ec.cfg("exports.pdf_min_column_width_pt", 60))
+            pad = float(ec.cfg("exports.pdf_cell_padding_pt", 3))
+            per_chunk = max(1, int(pdf.width // min_w))
+            cols = list(t["columns"]) or [""]
+            for start in range(0, len(cols), per_chunk):
+                idx = list(range(start, min(len(cols), start + per_chunk)))
+                width = pdf.width / len(idx)
+                data = [[Paragraph(cl(cols[i]), st["BodyText"]) for i in idx]] + \
+                       [[Paragraph(cl(r[i] if i < len(r) else ""), st["BodyText"]) for i in idx] for r in t["rows"]]
+                tb = RLTable(data, colWidths=[width] * len(idx), repeatRows=1)
+                tb.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.4, colors.grey), ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                                        ("LEFTPADDING", (0, 0), (-1, -1), pad), ("RIGHTPADDING", (0, 0), (-1, -1), pad)]))
+                if len(cols) > per_chunk:
+                    story.append(Paragraph(xesc(f"columns {start + 1}-{idx[-1] + 1} of {len(cols)}"), st["Italic"]))
+                story.append(tb)
     pdf.build(story)
     return bio.getvalue()
 
@@ -381,7 +395,7 @@ def run(inp: ExportIn, user: dict) -> dict:
     sensitive_scope = inp.scope.type in ec.cfg("exports.sensitive_scopes", [])
     if (not masked) or sensitive_scope:
         ec.notify_send("export_sensitive", message=f"Export {export_id} by {user['user_id']} (role {user['role']}): scope {inp.scope.type}, "
-                       f"{'UNMASKED' if not masked else 'masked'}, format {inp.format}.", link="/admin/exports")
+                       f"{'UNMASKED' if not masked else 'masked'}, format {inp.format}.", link="/exports")
     ec.dbg(AGENT, "done", export_id=export_id, ms=round((time.perf_counter() - t0) * 1000, 1))
     return {"export_id": export_id, "format": inp.format, "download_url": _signed_url("download", export_id, user["user_id"]),
             "content_hash": chash, "signed_manifest_url": _signed_url("manifest", export_id, user["user_id"]), "created_at": created}
@@ -396,6 +410,12 @@ def history(user: dict, limit: int = 100) -> dict:
             "masked": bool(r.masked), "created_at": r.created_at, "download_url": _signed_url("download", r.export_id, user["user_id"]),
             "signed_manifest_url": _signed_url("manifest", r.export_id, user["user_id"])} for r in rows]
     ec.audit("export_history_viewed", "export", "history", "success", {"returned": len(out)}, user=user)
+    ec.notify_send(
+        "export_history_viewed",
+        message=f"{user['user_id']} (role {user['role']}) viewed export history ({len(out)} export(s)).",
+        link="/exports",
+        dedupe_key=f"export-history-viewed:{user['user_id']}",
+    )
     ec.dbg(AGENT, "history", returned=len(out))
     return {"exports": out}
 

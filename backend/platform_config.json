@@ -57,20 +57,73 @@
     "max_region_rechecks_per_page": 60
   },
   "doc_types": {
-    "salary certificate / payslip": ["salary certificate", "payslip", "pay slip", "employee name", "pay period", "net salary", "gross salary"],
-    "bank statement": ["bank statement", "account holder", "statement period", "closing balance", "opening balance", "account number"],
-    "invoice": ["invoice", "invoice number", "bill to", "gstin", "amount due", "tax invoice"],
-    "loan / credit application": ["loan application", "applicant", "loan amount", "tenure", "borrower"],
-    "income certificate": ["income certificate", "annual income", "issued by"],
-    "financial statements": ["balance sheet", "profit and loss", "revenue", "ebitda", "total assets"],
-    "term sheet": ["term sheet", "valuation", "investment amount", "liquidation preference"],
-    "lecture slides / technical notes": ["algorithm", "complexity", "lecture", "theorem", "proof", "graph", "vertices"]
+    "salary certificate / payslip": [
+      "salary certificate",
+      "payslip",
+      "pay slip",
+      "employee name",
+      "pay period",
+      "net salary",
+      "gross salary"
+    ],
+    "bank statement": [
+      "bank statement",
+      "account holder",
+      "statement period",
+      "closing balance",
+      "opening balance",
+      "account number"
+    ],
+    "invoice": [
+      "invoice",
+      "invoice number",
+      "bill to",
+      "gstin",
+      "amount due",
+      "tax invoice"
+    ],
+    "loan / credit application": [
+      "loan application",
+      "applicant",
+      "loan amount",
+      "tenure",
+      "borrower"
+    ],
+    "income certificate": [
+      "income certificate",
+      "annual income",
+      "issued by"
+    ],
+    "financial statements": [
+      "balance sheet",
+      "profit and loss",
+      "revenue",
+      "ebitda",
+      "total assets"
+    ],
+    "term sheet": [
+      "term sheet",
+      "valuation",
+      "investment amount",
+      "liquidation preference"
+    ],
+    "lecture slides / technical notes": [
+      "algorithm",
+      "complexity",
+      "lecture",
+      "theorem",
+      "proof",
+      "graph",
+      "vertices"
+    ]
   },
   "parse_score": {
     "caps": {
       "UNUSABLE_TEXT_LAYER": 0.5,
       "OCR_FAILED": 0.7,
-      "CONFIDENCE_NOT_CROSS_CHECKED": 0.85
+      "CONFIDENCE_NOT_CROSS_CHECKED": 0.85,
+      "OCR_UNAVAILABLE": 0.85,
+      "PAGES_UNREAD": 0.5
     }
   },
   "agents": {
@@ -106,5 +159,37 @@
       "required_capability": "cases:review",
       "include_unverified_links": false
     }
+  },
+  "page_quality": {
+    "ink_grid_columns": 48,
+    "ink_gray_threshold": 160,
+    "ink_min_cell_fraction": 0.004,
+    "coverage_partial_below": 0.6,
+    "uncovered_min_cells": 4,
+    "equation_math_chars": "=+−-×÷*/^<>≤≥≠≈∑∏∫√∞∂∇αβγδεθλμπσφωΔΣΠΩ()[]{},",
+    "equation_operator_chars": "=+−×÷^<>≤≥≠≈∑∏∫√∂∇",
+    "equation_fragment_max_chars": 3,
+    "equation_min_math_ratio": 0.4,
+    "equation_prose_min_words": 3,
+    "equation_formula_max_words": 14,
+    "equation_line_gap_factor": 0.8,
+    "equation_x_gap_factor": 6.0,
+    "table_min_rows": 2,
+    "table_min_cols": 2,
+    "table_min_fill": 0.5,
+    "table_min_row_consistency": 0.6,
+    "table_max_words_per_cell": 12,
+    "chart_min_axis_fraction": 0.15,
+    "chart_corner_tolerance_pt": 6.0,
+    "chart_min_marks": 3,
+    "chart_label_margin_fraction": 0.12,
+    "caption_max_gap_fraction": 0.06,
+    "caption_pattern": "^\\s*(fig(ure)?|chart|graph|diagram|image|plate|plot)\\.?\\s*\\d+"
+  },
+  "ui": {
+    "batch_page_size": 10,
+    "block_render_chunk": 40,
+    "shred_max_chars": 2,
+    "shred_min_run": 3
   }
 }

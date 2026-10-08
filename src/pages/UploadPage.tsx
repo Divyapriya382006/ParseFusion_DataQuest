@@ -27,6 +27,7 @@ interface ValidatedSourceItem {
   sanitizedFilename: string;
   sizeBytes?: number;
   detectedMime?: string;
+  discoveredLinks?: Array<{ text: string; url: string }>;
   sourceId?: ID;
   status: "validating" | "accepted" | "rejected";
   error?: ApiError;
@@ -185,6 +186,7 @@ export const UploadPage: React.FC = () => {
             ? {
                 ...it,
                 sourceId: res.source_id,
+                discoveredLinks: res.links,
                 status: res.status === "allowed" ? "accepted" : "rejected",
                 error: res.error || (res.reason ? { code: "URL_POLICY_RESTRICTED", message: res.reason } : undefined),
               }
@@ -346,8 +348,23 @@ export const UploadPage: React.FC = () => {
                     <div className="text-[11px] text-neutral-500 font-mono flex items-center gap-2">
                       {item.sizeBytes && <span>{formatBytes(item.sizeBytes)}</span>}
                       {item.detectedMime && <span>{item.detectedMime}</span>}
-                      {item.sourceId && <span>ID: {item.sourceId}</span>}
+                       {item.url && <span>{item.discoveredLinks?.length ?? 0} DOM links</span>}
+                       {item.sourceId && <span>ID: {item.sourceId}</span>}
                     </div>
+                    {item.discoveredLinks?.length ? (
+                       <details className="mt-1 text-[11px] text-neutral-400">
+                         <summary className="cursor-pointer">{item.discoveredLinks.length} links found on page</summary>
+                         <ul className="mt-1 max-h-24 overflow-auto space-y-1">
+                           {item.discoveredLinks.map((link, index) => (
+                             <li key={`${link.url}-${index}`} className="truncate">
+                               <a href={link.url} target="_blank" rel="noopener noreferrer" className="text-sky-400 hover:underline">
+                                 {link.text || link.url}
+                               </a>
+                             </li>
+                           ))}
+                         </ul>
+                       </details>
+                    ) : null}
                   </div>
                 </div>
 

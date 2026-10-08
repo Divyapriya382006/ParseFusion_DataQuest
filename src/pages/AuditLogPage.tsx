@@ -32,6 +32,17 @@ export const AuditLogPage: React.FC = () => {
         signal
       ),
   });
+  const rows = auditData?.events ?? [];
+  const eventTypes = Array.from(new Set(rows.map((event) => event.event_type).filter(Boolean))).sort();
+  const actors = Array.from(
+    new Map(
+      rows
+        .filter((event) => event.actor_id)
+        .map((event) => [event.actor_id, { id: event.actor_id, role: event.actor_role }])
+    ).values()
+  ).sort((a, b) => a.id.localeCompare(b.id));
+  if (eventType && !eventTypes.includes(eventType)) eventTypes.unshift(eventType);
+  if (actor && !actors.some((option) => option.id === actor)) actors.unshift({ id: actor, role: "" });
 
   if (isError) {
     return (
@@ -90,27 +101,33 @@ export const AuditLogPage: React.FC = () => {
           <span className="font-semibold uppercase tracking-wider text-[11px]">Filters:</span>
         </div>
 
-        <input
-          type="text"
-          placeholder="Actor ID..."
+        <select
           value={actor}
-          onChange={(e) => setActor(e.target.value)}
-          className="bg-neutral-950 border border-neutral-800 rounded px-2.5 py-1 text-neutral-200 text-xs w-32"
-        />
+          aria-label="Filter by actor"
+          onChange={(e) => { setActor(e.target.value); setCursor(undefined); }}
+          className="bg-neutral-950 border border-neutral-800 rounded px-2.5 py-1 text-neutral-200 text-xs min-w-40"
+        >
+          <option value="">All actors</option>
+          {actors.map((option) => (
+            <option key={option.id} value={option.id}>{option.id}{option.role ? ` (${option.role})` : ""}</option>
+          ))}
+        </select>
 
-        <input
-          type="text"
-          placeholder="Event Type..."
+        <select
           value={eventType}
-          onChange={(e) => setEventType(e.target.value)}
-          className="bg-neutral-950 border border-neutral-800 rounded px-2.5 py-1 text-neutral-200 text-xs w-40"
-        />
+          aria-label="Filter by event type"
+          onChange={(e) => { setEventType(e.target.value); setCursor(undefined); }}
+          className="bg-neutral-950 border border-neutral-800 rounded px-2.5 py-1 text-neutral-200 text-xs min-w-40"
+        >
+          <option value="">All event types</option>
+          {eventTypes.map((type) => <option key={type} value={type}>{type}</option>)}
+        </select>
 
         <input
           type="text"
           placeholder="Case ID..."
           value={caseId}
-          onChange={(e) => setCaseId(e.target.value)}
+          onChange={(e) => { setCaseId(e.target.value); setCursor(undefined); }}
           className="bg-neutral-950 border border-neutral-800 rounded px-2.5 py-1 text-neutral-200 text-xs w-32"
         />
 

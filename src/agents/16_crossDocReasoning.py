@@ -72,6 +72,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
 from typing import Any, Literal, Optional, Union
 
+from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from rapidfuzz import fuzz
 
@@ -1060,7 +1061,7 @@ _HTTP = {"INVALID_INPUT": 400, "NOT_FOUND": 404, "FORBIDDEN": 403, "CONFLICT": 4
 
 def build_router():
     import uuid
-    from fastapi import APIRouter, Body, Request
+    from fastapi import APIRouter, Body
     from fastapi.responses import JSONResponse
 
     router = APIRouter()

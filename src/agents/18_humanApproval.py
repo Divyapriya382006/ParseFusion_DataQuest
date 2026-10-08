@@ -82,7 +82,7 @@ from typing import Any, Awaitable, Callable, Literal, Optional
 from urllib import robotparser
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 try:  # shared error type from Person C's common package
     from backend.common.errors import AgentError  # type: ignore
@@ -120,6 +120,7 @@ class UrlIngestOutput(BaseModel):
     reason: Optional[str] = None
     robots_checked: bool
     source_id: Optional[str] = None
+    links: list[dict[str, str]] = Field(default_factory=list)
     snapshot: Optional[Snapshot] = None
     error: Optional[ErrorInfo] = None
 
@@ -216,6 +217,7 @@ class RenderResult:
     blocked_requests: int = 0
     total_elements: int = 0
     dropped_below_fold: int = 0
+    links: list = field(default_factory=list)
 
 
 @dataclass
@@ -692,7 +694,7 @@ _EXTRACT_JS = r"""
   const sx = window.scrollX, sy = window.scrollY;
   const docW = Math.max(document.documentElement.scrollWidth, document.body ? document.body.scrollWidth : 0);
   const docH = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0);
-  const visible = [], hidden = [], aux = [];
+  const visible = [], hidden = [], aux = [], links = [];
   const transparent = /rgba?\([^)]*,\s*0(\.0+)?\)$/;
   const hiddenByStyle = (el) => {
     for (let e = el; e; e = e.parentElement) {
@@ -726,7 +728,23 @@ _EXTRACT_JS = r"""
       if (v && aux.length < args.maxAux) aux.push(v.slice(0, 1000));
     }
   }
-  return {visible, hidden, aux, docW, docH, hasPassword: !!document.querySelector('input[type=password]')};
+  const seenLinks = new Set();
+  for (const el of document.querySelectorAll('a[href]')) {
+    if (links.length >= args.maxLinks) break;
+    try {
+      const parsed = new URL(el.href);
+      if (!['http:', 'https:'].includes(parsed.protocol)) continue;
+      parsed.username = '';
+      parsed.password = '';
+      parsed.search = '';
+      parsed.hash = '';
+      const url = parsed.toString();
+      if (seenLinks.has(url)) continue;
+      seenLinks.add(url);
+      links.push({text: (el.innerText || el.getAttribute('aria-label') || el.title || '').trim().slice(0, 300), url});
+    } catch (_) {}
+  }
+  return {visible, hidden, aux, links, docW, docH, hasPassword: !!document.querySelector('input[type=password]')};
 }
 """
 
@@ -802,7 +820,7 @@ async def _playwright_render(target: Target, doc: HttpResult, cfg: UrlGuardConfi
                 await page.wait_for_load_state("networkidle", timeout=cfg.settle_timeout_ms)
             except Exception:
                 pass
-            data = await page.evaluate(_EXTRACT_JS, {"maxAux": cfg.max_aux_strings})
+            data = await page.evaluate(_EXTRACT_JS, {"maxAux": cfg.max_aux_strings, "maxLinks": cfg.max_aux_strings})
             width = max(1, min(int(data["docW"]), cfg.viewport_width))
             height = max(1, min(int(data["docH"]), cfg.max_page_height))
             png = await page.screenshot(full_page=True, type="png", animations="disabled",
@@ -816,7 +834,8 @@ async def _playwright_render(target: Target, doc: HttpResult, cfg: UrlGuardConfi
     dropped = len(visible) - len(kept)
     total = len(kept)
     return RenderResult(png=png, page_width=pw_w, page_height=pw_h, elements=kept[:cfg.max_text_elements],
-                        hidden=data["hidden"], aux=data["aux"], has_password_field=bool(data["hasPassword"]),
+                        links=data.get("links", []), hidden=data["hidden"], aux=data["aux"],
+                        has_password_field=bool(data["hasPassword"]),
                         blocked_requests=stats["blocked"], total_elements=total, dropped_below_fold=dropped)
 
 
@@ -825,11 +844,22 @@ async def _playwright_render(target: Target, doc: HttpResult, cfg: UrlGuardConfi
 # --------------------------------------------------------------------------- #
 def default_deps() -> Deps:
     from backend.common import audit, auth, config, crypto, jobs, notify, store  # type: ignore
+
+    def submit_pipeline_job(name: str, payload: Any = None) -> str:
+        if name == "pipeline.ingest_source":
+            from backend import pipeline_api
+            source_id = str((payload or {}).get("source_id", ""))
+            record = store.get("source", source_id)
+            if not isinstance(record, dict):
+                raise AgentError("ENGINE_FAILED", "The stored website source is unavailable")
+            pipeline_api.register_url_source(record, str(record.get("tenant_id") or ""), crypto.decrypt)
+        return jobs.submit(name, payload)
+
     return Deps(
         cfg=lambda: config.get("url_guard"), user=auth.current_user,
         audit_append=audit.append, notify_send=notify.send, encrypt=crypto.encrypt,
         canonical_json=crypto.canonical_json, sha256_hex=crypto.sha256_hex,
-        store_put=store.put, signed_url=crypto.signed_url, submit_job=jobs.submit,
+        store_put=store.put, signed_url=crypto.signed_url, submit_job=submit_pipeline_job,
         resolve=_system_resolve, http_get=_httpx_get, render=_playwright_render,
         now=lambda: datetime.now(timezone.utc), new_id=lambda: str(uuid.uuid4()))
 
@@ -1033,6 +1063,7 @@ async def _commit(acq: _Acquired, basis: Optional[str], purpose: Optional[str], 
     keep = analysis["keep_snapshot"]
     record = {
         "source_id": source_id,
+        "tenant_id": tenant,
         "origin": {"type": "url", "url": inp.url.strip()},
         "display_name": (acq.gf.target.host + urlsplit(acq.gf.target.url).path)[:120],
         "sha256": deps.sha256_hex(acq.gf.res.body),
@@ -1041,6 +1072,7 @@ async def _commit(acq: _Acquired, basis: Optional[str], purpose: Optional[str], 
         "page": {"page_id": page_id, "page_number": 1, "page_width": acq.render.page_width,
                  "page_height": acq.render.page_height, "bbox_origin": "pixel_top_left", "dpi": 96},
         "fetched_at": fetched_at, "final_host": acq.gf.target.host,
+        "links": acq.render.links, "content_size_bytes": len(acq.gf.res.body),
         "text_blob": deps.encrypt(_canon(deps, {"elements": analysis["elements"]}), aad),
         "snapshot_blob": deps.encrypt(acq.render.png, aad) if keep else None,
         "snapshot_omitted": not keep,
@@ -1064,14 +1096,16 @@ async def _commit(acq: _Acquired, basis: Optional[str], purpose: Optional[str], 
         raise AgentError("ENGINE_FAILED", "The snapshot could not be stored")
     try:
         await _maybe(deps.submit_job("pipeline.ingest_source", {"source_id": source_id}))
-    except Exception:
+    except Exception as exc:
         await _audit(deps, "url_handoff_failed", "error", "source", source_id, {}, strict=False)
+        raise AgentError("ENGINE_FAILED", "The website was stored but could not be added to the parsing pipeline") from exc
 
     snap = None
     if keep:
         snap = Snapshot(screenshot_url=deps.signed_url(f"/sources/{source_id}/pages/1/image", cfg.screenshot_url_ttl_s),
                         fetched_at=fetched_at)
-    return UrlIngestOutput(status="allowed", robots_checked=ctx.robots_checked, source_id=source_id, snapshot=snap)
+    return UrlIngestOutput(status="allowed", robots_checked=ctx.robots_checked, source_id=source_id,
+                           links=acq.render.links, snapshot=snap)
 
 
 async def _blocked(b: Blocked, cfg: UrlGuardConfig, deps: Deps, ctx: _Ctx) -> UrlIngestOutput:

@@ -111,7 +111,11 @@ def test_t3_cell_facts_carry_headers(salary):
 
 def test_t4_matrix_cells_and_pseudocode_are_not_facts(algo):
     assert _facts(algo) == []
-    assert sum(d["facts"]["unclassified_numbers"] for d in algo["report"]["documents"]) >= 3
+    # the pseudocode/matrix lines either became equation blocks or were counted as unclassified numbers
+    parsing = next(s for s in algo["stages"] if s["stage"] == "parsing")["output"]
+    equations = sum(p["blocks_by_type"].get("equation", 0) for p in parsing)
+    unclassified = sum(d["facts"]["unclassified_numbers"] for d in algo["report"]["documents"])
+    assert equations + unclassified >= len(parsing)  # every document had such lines
 
 
 def test_t5_counts_reconcile(salary):
